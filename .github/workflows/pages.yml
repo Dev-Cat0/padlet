@@ -2,7 +2,7 @@ name: Deploy web panel to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ['web/**', '.github/workflows/pages.yml']
+    paths: ['web/**', 'pc-helper/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,6 +19,8 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
+      - name: Package Windows PC helper
+        run: zip -j web/padlet-pc-helper.zip pc-helper/helper.py pc-helper/requirements.txt pc-helper/start.cmd pc-helper/README.md
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

@@ -10,8 +10,10 @@ from pydantic import BaseModel, Field, field_validator
 from .engine import Sender
 from .sessions import Sessions
 from .stream import browser_stream
+from .pc import PCConnections, open_pc, accept_capture
 
 sessions = Sessions()
+pc_connections = PCConnections(sessions)
 allowed_origins = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "https://dev-cat0.github.io").split(",") if s.strip()]
 
 
@@ -23,6 +25,7 @@ async def lifespan(app):
     with suppress(asyncio.CancelledError):
         await cleanup
     await sessions.shutdown()
+    pc_connections.attempts.clear()
 
 
 app = FastAPI(title="Padlet Sender", lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -54,6 +57,83 @@ async def headers(request, call_next):
 
 class OpenRequest(BaseModel):
     url: str = Field(min_length=20, max_length=2000)
+
+
+class PairRequest(BaseModel):
+    code: str = Field(pattern=r"^[0-9A-Fa-f]{10}$")
+
+
+class PCCapture(BaseModel):
+    command_id: str = Field(min_length=32, max_length=32)
+    endpoint: str = Field(max_length=2000)
+    status: int
+    headers: dict[str, str]
+    template: dict
+
+
+class PCStatus(BaseModel):
+    command_id: str = Field(min_length=32, max_length=32)
+    phase: Literal["opened", "closed", "error"]
+
+
+async def authorize_pc(authorization: str = Header(default="")):
+    return pc_connections.authorize(authorization)
+
+
+@app.post("/api/pc/pair")
+async def pair_pc(sender: Sender = Depends(authorize)):
+    return sender.pc.pair()
+
+
+@app.post("/api/pc/connect")
+async def connect_pc(data: PairRequest):
+    return pc_connections.connect(data.code.upper())
+
+
+@app.get("/api/pc/command")
+async def pc_command(sender: Sender = Depends(authorize_pc)):
+    return {"command": sender.pc.command}
+
+
+@app.post("/api/pc/open")
+async def start_pc(data: OpenRequest, sender: Sender = Depends(authorize)):
+    try:
+        await open_pc(sender, data.url)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return sender.status()
+
+
+@app.post("/api/pc/capture")
+async def capture_pc(data: PCCapture, sender: Sender = Depends(authorize_pc)):
+    await accept_capture(sender, data)
+    return {"ok": True}
+
+
+@app.post("/api/pc/status")
+async def pc_status(data: PCStatus, sender: Sender = Depends(authorize_pc)):
+    command = sender.pc.command
+    if not command or command['id'] != data.command_id:
+        raise HTTPException(409, "이미 교체된 브라우저입니다.")
+    if data.phase == "opened" and sender.pc.active:
+        sender.opening, sender.phase = False, "capturing"
+        sender.log("PC에 열린 브라우저에서 로그인 후 글을 한 번 게시하세요.")
+    elif data.phase in {"closed", "error"} and sender.pc.active:
+        sender.pc.active, sender.opening = False, False
+        sender.phase = "error" if data.phase == "error" else "waiting"
+        sender.log("PC 브라우저 실행에 실패했습니다. 도우미를 확인하세요." if data.phase == "error"
+                   else "PC 브라우저가 닫혔습니다.", "warning")
+    return {"ok": True}
+
+
+@app.post("/api/pc/disconnect")
+async def disconnect_pc(sender: Sender = Depends(authorize_pc)):
+    sender.pc.token = ""
+    if sender.pc.active:
+        sender.pc.cancel()
+        sender.opening = False
+        sender.phase = "waiting"
+    return {"ok": True}
 
 
 class SendRequest(BaseModel):
