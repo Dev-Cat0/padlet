@@ -15,7 +15,7 @@
 ## 사용 순서
 
 1. GitHub Pages의 웹 패널을 엽니다.
-2. Render 서버 주소와 **패널 접속 키**를 입력하고 연결합니다. 접속 키는 Render 서비스의 Environment에 있는 `PANEL_TOKEN` 값입니다. Padlet 비밀번호나 Padlet API 키가 아닙니다.
+2. **패널 접속 키**만 입력하고 연결합니다. 서버 주소는 고정되어 있습니다. 접속 키는 Render 서비스의 Environment에 있는 `PANEL_TOKEN` 값입니다. Padlet 비밀번호나 Padlet API 키가 아닙니다.
 3. 대상 `https://padlet.com/...` 주소를 입력하고 **브라우저 열기 & 로그인**을 누릅니다.
 4. 패널 하단에 나타난 서버 브라우저 화면에서 로그인합니다. 입력란을 클릭한 뒤 별도 텍스트 입력창에 내용을 입력하고 **텍스트 입력**을 누릅니다. 한글, 이메일, 비밀번호를 이 방식으로 입력할 수 있습니다. Tab/Enter/스크롤 버튼과 팝업 탭 선택도 지원합니다.
 5. 해당 게시판에서 게시물을 한 번 작성합니다. 이 글은 실제로 게시됩니다. 성공한 `/api/9/wishes` POST 요청을 캡처하면 브라우저가 닫히고 시작 버튼이 활성화됩니다.
@@ -47,7 +47,7 @@
 - `PANEL_TOKEN`: 32자 이상의 임의 접속 키. Blueprint는 자동 생성합니다.
 - `ALLOWED_ORIGINS`: `https://dev-cat0.github.io` (경로 `/padlet/`는 포함하지 않음)
 
-생성된 서비스 URL을 `web/config.js`의 `serverUrl`에 넣으면 패널에 기본 표시됩니다. 서버 URL만 공개하고 접속 키나 쿠키는 저장소에 넣지 마세요. 직접 생성한 Render 서비스 설정은 Dashboard가 관리하며 `render.yaml`은 대체 배포용입니다.
+서버 주소는 `web/config.js`의 `serverUrl`로 고정되며 패널에서 변경할 수 없습니다. 서버 URL만 공개하고 접속 키나 쿠키는 저장소에 넣지 마세요. 직접 생성한 Render 서비스 설정은 Dashboard가 관리하며 `render.yaml`은 대체 배포용입니다.
 
 Chromium은 메모리를 사용하므로 무료 인스턴스에서 메모리 부족이 발생하면 Render 로그를 확인하세요. 유료 전환은 사용자가 선택해야 합니다. 서버가 재시작되거나 재배포되면 로그인, 캡처, 로그, 진행 중인 전송은 복구되지 않습니다. 인메모리 상태를 사용하므로 Uvicorn worker와 Render 인스턴스는 각각 하나로 유지합니다.
 
@@ -70,7 +70,7 @@ $env:ALLOWED_ORIGINS = 'http://127.0.0.1:4173'
 .\.venv\Scripts\python -m http.server 4173 --bind 127.0.0.1 --directory web
 ```
 
-`http://127.0.0.1:4173`을 열고 서버 주소를 `http://127.0.0.1:4174`로 입력합니다.
+로컬 검증 시에만 `web/config.js`의 `serverUrl`을 `http://127.0.0.1:4174`로 바꾸고 `http://127.0.0.1:4173`을 엽니다. 배포 전에는 Render 주소로 되돌립니다.
 
 ```powershell
 .\.venv\Scripts\python -m pytest -q

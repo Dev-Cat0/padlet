@@ -1,19 +1,10 @@
 "use strict";
 const $ = id => document.getElementById(id);
-let base = "", token = "", connected = false, state = null, logs = [], lastLog = 0;
+const base = window.PADLET_CONFIG.serverUrl;
+let token = "", connected = false, state = null, logs = [], lastLog = 0;
 let generation = 0, imageUrl = null, pollTimer = null, frameBusy = false, actionQueue = Promise.resolve();
 const phases = {waiting:"시작 대기",opening:"브라우저 실행 중",capturing:"로그인·게시 요청 대기",ready:"캡처 완료",sending:"전송 중",backoff:"요청 제한 · 대기 중",stopping:"중지 중 · 진행 중인 요청 완료 대기",stopped:"사용자 중지",finished:"전송 완료",error:"오류 확인 필요"};
-$('serverUrl').value = window.PADLET_CONFIG?.serverUrl || localStorage.getItem('padlet-server') || '';
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
-function serverAddress(raw) {
-  const url = new URL(raw);
-  const local = ['localhost','127.0.0.1'].includes(url.hostname);
-  if (url.username || url.password || url.search || url.hash || url.pathname !== '/' ||
-      !(url.protocol === 'https:' && url.hostname.endsWith('.onrender.com') || local && url.protocol === 'http:')) {
-    throw new Error('Render의 https://…onrender.com 서버 주소를 입력하세요.');
-  }
-  return url.origin;
-}
 async function api(path, data, asBlob = false) {
   const res = await fetch(base + path, {method:data === undefined ? 'GET':'POST',
     headers:{Authorization:`Bearer ${token}`, ...(data === undefined ? {}:{'Content-Type':'application/json'})},
@@ -26,7 +17,7 @@ async function api(path, data, asBlob = false) {
 }
 function networkMessage(error) {
   return error.name === 'TimeoutError' || error instanceof TypeError
-    ? '서버 연결이 지연되거나 끊겼습니다. Render 서버 상태·주소를 확인하세요. 실행 중인 작업은 서버에서 계속될 수 있습니다.'
+    ? '서버 연결이 지연되거나 끊겼습니다. 잠시 후 다시 연결해 주세요. 실행 중인 작업은 서버에서 계속될 수 있습니다.'
     : error.message;
 }
 function render(next) {
@@ -43,7 +34,6 @@ function render(next) {
   $('stopBtn').disabled = !connected || !next.running || next.phase === 'stopping';
   $('clearSession').disabled = !connected || next.opening;
   $('resetBtn').disabled = next.opening;
-  $('serverUrl').disabled = next.running || next.opening;
   $('connectBtn').disabled = next.running || next.opening;
   $('targetUrl').disabled = next.running || next.opening;
   for (const id of ['subject','body','limit','delay']) $(id).disabled = next.running;
@@ -104,7 +94,7 @@ async function poll(current) {
     $('connectionBadge').textContent = '● 연결 재시도 중'; $('connectionBadge').classList.remove('connected');
     notice(networkMessage(error));
     $('openBtn').disabled = $('startBtn').disabled = true;
-    $('connectBtn').disabled = false; $('serverUrl').disabled = false;
+    $('connectBtn').disabled = false;
   }
   if (current === generation) pollTimer = setTimeout(() => poll(current), document.hidden ? 4000:1200);
 }
@@ -113,10 +103,10 @@ $('connectForm').addEventListener('submit', async event => {
   if (state?.running) return;
   clearTimeout(pollTimer); generation++; connected = false;
   try {
-    base = serverAddress($('serverUrl').value.trim()); token = $('token').value;
+    token = $('token').value;
     $('connectBtn').disabled = true; $('connectBtn').textContent = '연결 중…';
     const next = await api('/api/state');
-    connected = true; localStorage.setItem('padlet-server', base); lastLog = 0; $('log').replaceChildren();
+    connected = true; lastLog = 0; $('log').replaceChildren();
     render(next); poll(generation);
   } catch (error) { notice(networkMessage(error)); $('connectionBadge').textContent = '● 연결 실패'; $('connectionBadge').classList.remove('connected'); }
   finally { $('connectBtn').disabled = false; $('connectBtn').textContent = '서버 연결 ↗'; }
