@@ -2,6 +2,10 @@
 
 제공된 `padlet.py`의 **브라우저 로그인 → 게시 요청 캡처 → 반복 전송** 흐름을 GitHub Pages + Render로 옮긴 프로젝트입니다. 공식 Padlet API 키는 사용하지 않습니다.
 
+- 웹 패널: https://dev-cat0.github.io/padlet/
+- 서버: https://padlet-sender-panel.onrender.com
+- 서버 관리: https://dashboard.render.com/web/srv-dbae7t0m7kps738gj5c0
+
 - `web/`: 빌드 없이 GitHub Pages에서 실행하는 한국어 웹 패널
 - `server/`: FastAPI, Playwright Chromium, curl_cffi 서버
 - `desktop/padlet.py`: 전달받은 데스크톱 원본
