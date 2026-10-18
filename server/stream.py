@@ -72,7 +72,7 @@ async def browser_stream(socket, sender, action_model):
             cdp.on('Page.screencastFrame', on_frame)
             try:
                 await cdp.send('Page.startScreencast', {
-                    'format':'jpeg', 'quality':45, 'maxWidth':1100, 'maxHeight':720,
+                    'format':'jpeg', 'quality':40, 'maxWidth':880, 'maxHeight':576,
                     'everyNthFrame':1})
                 await page.bring_to_front()
                 await send_json({'type':'ready'})
@@ -83,7 +83,8 @@ async def browser_stream(socket, sender, action_model):
                     except TimeoutError:
                         continue
                     # Keep only the newest frame; never build a stale image backlog.
-                    await asyncio.sleep(max(0, .125 - (time.monotonic() - last_sent)))
+                    # Leave CPU headroom for page scripts and input on small instances.
+                    await asyncio.sleep(max(0, .25 - (time.monotonic() - last_sent)))
                     changed.clear()
                     image, acks = latest, list(pending)
                     pending.clear()

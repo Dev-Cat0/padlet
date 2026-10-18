@@ -171,7 +171,8 @@ class Sender:
             self.browser = await self.playwright.chromium.launch(
                 headless=True, args=["--disable-dev-shm-usage"])
             self.context = await self.browser.new_context(
-                viewport={"width": 1100, "height": 720}, locale="ko-KR", service_workers="block")
+                viewport={"width": 1100, "height": 720}, locale="ko-KR", service_workers="block",
+                reduced_motion="reduce")
             await self.context.route("**/*", self.route)
             self.context.on("response", self.observe)
             self.context.on("page", self.select_page)
