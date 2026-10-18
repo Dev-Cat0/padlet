@@ -61,6 +61,9 @@ class Sender:
         self.limit = 0
         self.phase = "waiting"
         self.last_activity = time.monotonic()
+        self.dns_cache = {}
+        self.dns_pending = {}
+        self.stream_socket = None
 
     def log(self, message, level="info"):
         self.sequence += 1
@@ -89,14 +92,34 @@ class Sender:
         try:
             if parsed.scheme not in {"https", "http"} or parsed.port not in {None, 80, 443}:
                 return await route.abort()
-            addresses = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, None)
-            if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+            if not await self.public_host(parsed.hostname):
                 return await route.abort()
             await route.continue_()
         except (OSError, ValueError):
             await route.abort()
 
+    async def public_host(self, hostname):
+        cached = self.dns_cache.get(hostname)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        if hostname not in self.dns_pending:
+            self.dns_pending[hostname] = asyncio.create_task(
+                asyncio.to_thread(socket.getaddrinfo, hostname, None))
+        task = self.dns_pending[hostname]
+        try:
+            addresses = await asyncio.shield(task)
+            public = bool(addresses) and all(ipaddress.ip_address(a[4][0]).is_global for a in addresses)
+            if len(self.dns_cache) >= 256:
+                self.dns_cache.clear()
+            self.dns_cache[hostname] = (time.monotonic() + 60, public)
+            return public
+        finally:
+            if task.done():
+                self.dns_pending.pop(hostname, None)
+
     def observe(self, response):
+        if response.request.method != "POST" or not is_capture_url(response.url):
+            return
         task = asyncio.create_task(self.capture(response, self.generation))
         self.capture_tasks.add(task)
         task.add_done_callback(self.capture_tasks.discard)
@@ -176,9 +199,9 @@ class Sender:
         raise ValueError("열린 브라우저가 없습니다.")
 
     async def screenshot(self):
-        async with self.browser_lock:
-            page = self.active_page()
-            return await page.screenshot(type="jpeg", quality=65, timeout=10000)
+        # Image encoding must never hold the input/close lock.
+        page = self.active_page()
+        return await page.screenshot(type="jpeg", quality=50, timeout=10000)
 
     async def control(self, action):
         async with self.browser_lock:

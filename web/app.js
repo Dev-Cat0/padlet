@@ -4,6 +4,10 @@ const base = window.PADLET_CONFIG.serverUrl;
 let token = "", connected = false, state = null, logs = [], lastLog = 0;
 let generation = 0, imageUrl = null, pollTimer = null, frameBusy = false, actionQueue = Promise.resolve();
 let reconnectTimer = null;
+let stream = null, streamReady = false, streamFailed = false, nextStreamAttempt = 0;
+let streamFailures = 0, nextActionId = 0, tabsUpdated = 0, tabsBusy = false;
+const pendingActions = new Map();
+let typedText = '', typingTimer = null, scrollDelta = 0, scrollTimer = null;
 try { token = sessionStorage.getItem('padlet-session') || ''; } catch (_) { /* Memory-only fallback. */ }
 const phases = {waiting:"시작 대기",opening:"브라우저 실행 중",capturing:"로그인·게시 요청 대기",ready:"캡처 완료",sending:"전송 중",backoff:"요청 제한 · 대기 중",stopping:"중지 중 · 진행 중인 요청 완료 대기",stopped:"사용자 중지",finished:"전송 완료",error:"오류 확인 필요"};
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
@@ -41,6 +45,8 @@ function render(next) {
   $('targetUrl').disabled = next.running || next.opening;
   for (const id of ['subject','body','limit','delay']) $(id).disabled = next.running;
   $('browserSection').hidden = !next.browser && !next.opening;
+  if (next.browser && connected) ensureStream();
+  else closeStream();
   $('actionHint').textContent = next.running ? '중지를 누르면 현재 요청이 끝난 후 멈춥니다.' : next.ready ? '캡처 완료. 제목과 본문을 입력하고 전송을 시작하세요.' : next.browser ? '아래 브라우저에서 로그인하고 글을 한 번 게시하세요.' : '브라우저를 열고 게시 요청을 캡처하세요.';
   if (next.limit > 0) {
     $('progress').value = Math.min(next.sent / next.limit * 100, 100);
@@ -67,21 +73,76 @@ function render(next) {
   }
   $('logCount').textContent = `${incoming.length} EVENTS`;
 }
-async function frame() {
-  if (frameBusy || !state?.browser) return;
-  frameBusy = true;
-  const current = generation;
+function showFrame(blob) {
+  const old = imageUrl;
+  imageUrl = URL.createObjectURL(blob); $('screen').src = imageUrl;
+  $('screenPlaceholder').hidden = true;
+  if (old) URL.revokeObjectURL(old);
+}
+function closeStream() {
+  const old = stream; stream = null; streamReady = false;
+  pendingActions.clear();
+  clearTimeout(typingTimer); typedText = '';
+  clearTimeout(scrollTimer); scrollDelta = 0;
+  if (old) old.close();
+}
+function ensureStream() {
+  if (stream || !state?.browser || Date.now() < nextStreamAttempt) return;
+  const socket = new WebSocket(base.replace(/^http/, 'ws') + '/api/browser/stream');
+  stream = socket;
+  $('streamStatus').textContent = '실시간 화면 연결 중…';
+  socket.onopen = () => socket.send(JSON.stringify({token}));
+  socket.onmessage = event => {
+    if (stream !== socket) return;
+    if (typeof event.data !== 'string') {
+      showFrame(event.data); return;
+    }
+    const message = JSON.parse(event.data);
+    if (message.type === 'ready') {
+      streamReady = true; streamFailed = false; streamFailures = 0;
+      $('streamStatus').textContent = '● 실시간 화면';
+    } else if (message.type === 'ack') {
+      const started = pendingActions.get(message.id);
+      pendingActions.delete(message.id);
+      if (started !== undefined) $('streamStatus').textContent = `● 실시간 화면 · 입력 응답 ${Math.round(performance.now() - started)}ms`;
+    } else if (message.type === 'error') {
+      pendingActions.clear(); notice(message.message);
+    } else if (message.type === 'fallback') {
+      socket.close();
+    }
+  };
+  socket.onclose = () => {
+    if (stream !== socket) return;
+    stream = null; streamReady = false; streamFailed = true;
+    streamFailures++;
+    nextStreamAttempt = Date.now() + Math.min(1000 * 2 ** streamFailures, 15000);
+    if (pendingActions.size) notice('화면 연결이 끊겼습니다. 마지막 입력 결과를 확인하세요.');
+    pendingActions.clear();
+    $('streamStatus').textContent = '화면 재연결 중 · 기본 화면 모드';
+  };
+}
+async function updateTabs() {
+  if (tabsBusy || !state?.browser || Date.now() - tabsUpdated < 3000) return;
+  tabsBusy = true;
   try {
-    const blob = await api('/api/browser/frame', undefined, true);
-    if (current !== generation || !state?.browser) return;
-    const old = imageUrl; imageUrl = URL.createObjectURL(blob); $('screen').src = imageUrl;
-    $('screenPlaceholder').hidden = true; if (old) URL.revokeObjectURL(old);
     const tabs = await api('/api/browser/tabs');
+    tabsUpdated = Date.now();
     $('tabs').replaceChildren(...tabs.map(tab => {
       const button = document.createElement('button'); button.textContent = `${tab.index + 1} · ${tab.host}`;
       button.className = tab.active ? 'active':'';
       button.onclick = () => control({kind:'tab',index:tab.index}); return button;
     }));
+  } catch (_) { /* Browser may have closed after capture. */ }
+  finally { tabsBusy = false; }
+}
+async function frame() {
+  if (frameBusy || !state?.browser || streamReady || !streamFailed) return;
+  frameBusy = true;
+  const current = generation;
+  try {
+    const blob = await api('/api/browser/frame', undefined, true);
+    if (current !== generation || !state?.browser) return;
+    if (!streamReady) showFrame(blob);
   } catch (_) { /* Capture closes the browser while the final frame may be in flight. */ }
   finally { frameBusy = false; }
 }
@@ -91,7 +152,7 @@ async function poll(current) {
     const next = await api('/api/state');
     if (current !== generation) return;
     render(next); $('connectionBadge').textContent = '● 서버 연결됨'; $('connectionBadge').classList.add('connected');
-    await frame();
+    void frame(); void updateTabs();
   } catch (error) {
     if (current !== generation) return;
     $('connectionBadge').textContent = '● 연결 재시도 중'; $('connectionBadge').classList.remove('connected');
@@ -106,6 +167,7 @@ function forgetSession() {
   try { sessionStorage.removeItem('padlet-session'); } catch (_) {}
 }
 async function connect() {
+  closeStream();
   clearTimeout(reconnectTimer);
   clearTimeout(pollTimer); generation++; connected = false;
   const current = generation;
@@ -139,7 +201,7 @@ $('captureForm').addEventListener('submit', async event => {
     if (url.protocol !== 'https:' || !['padlet.com','www.padlet.com'].includes(url.hostname)) throw new Error('https://padlet.com/ 게시판 주소를 입력하세요.');
     $('browserSection').hidden = false; $('screen').removeAttribute('src'); $('screenPlaceholder').hidden = false;
     render(await api('/api/browser/open', {url:url.href}));
-    await frame(); $('browserSection').scrollIntoView({behavior:'smooth', block:'start'});
+    void updateTabs(); $('browserSection').scrollIntoView({behavior:'smooth', block:'start'});
   } catch (error) { notice(networkMessage(error)); }
   finally { if (state) render(state); }
 });
@@ -158,11 +220,37 @@ async function reset() {
 }
 $('clearSession').onclick = $('resetBtn').onclick = reset;
 function control(action) {
-  // Preserve ordering between clicks, text, and keys over a slow connection.
+  flushText(); flushScroll();
+  return sendControl(action);
+}
+function sendControl(action) {
+  if (streamReady && stream?.readyState === WebSocket.OPEN) {
+    if (stream.bufferedAmount > 65536 || pendingActions.size >= 64) {
+      notice('서버가 입력을 처리 중입니다. 잠시 후 다시 입력하세요.');
+      return Promise.resolve();
+    }
+    const id = ++nextActionId;
+    pendingActions.set(id, performance.now());
+    stream.send(JSON.stringify({id, action}));
+    return Promise.resolve();
+  }
+  // HTTP fallback retains ordering, but never waits for an image capture.
   actionQueue = actionQueue.then(async () => {
     await api('/api/browser/action', action);
   }).catch(error => notice(networkMessage(error)));
   return actionQueue;
+}
+function flushText() {
+  clearTimeout(typingTimer);
+  if (typedText) { const text = typedText; typedText = ''; void sendControl({kind:'text',text}); }
+}
+function queueText(text) {
+  typedText += text; clearTimeout(typingTimer); typingTimer = setTimeout(flushText, 40);
+}
+function flushScroll() {
+  clearTimeout(scrollTimer);
+  scrollTimer = null;
+  if (scrollDelta) { const delta = scrollDelta; scrollDelta = 0; void sendControl({kind:'scroll',delta}); }
 }
 $('screen').addEventListener('click', event => {
   const box = $('screen').getBoundingClientRect();
@@ -174,9 +262,13 @@ $('screen').addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {event.preventDefault(); control({kind:'key',key:'Control+a'});return;}
   const keys = ['Enter','Tab','Backspace','Delete','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
   if (keys.includes(event.key)) {event.preventDefault(); control({kind:'key',key:event.shiftKey && event.key === 'Tab' ? 'Shift+Tab':event.key});}
-  else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {event.preventDefault(); control({kind:'text',text:event.key});}
+  else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {event.preventDefault(); queueText(event.key);}
 });
-$('screen').addEventListener('wheel', event => {event.preventDefault();control({kind:'scroll',delta:Math.max(-1500,Math.min(1500,Math.round(event.deltaY)))});},{passive:false});
+$('screen').addEventListener('wheel', event => {
+  event.preventDefault(); flushText();
+  scrollDelta = Math.max(-1500, Math.min(1500, scrollDelta + Math.round(event.deltaY)));
+  if (!scrollTimer) scrollTimer = setTimeout(() => {scrollTimer = null; flushScroll();}, 50);
+},{passive:false});
 $('typeForm').addEventListener('submit', async event => {event.preventDefault(); const text = $('remoteText').value; $('remoteText').value = ''; if (text) await control({kind:'text',text});});
 document.querySelectorAll('[data-key]').forEach(button => button.onclick = () => control({kind:'key',key:button.dataset.key}));
 document.querySelectorAll('[data-scroll]').forEach(button => button.onclick = () => control({kind:'scroll',delta:Number(button.dataset.scroll)}));
@@ -184,6 +276,6 @@ $('downloadLog').onclick = () => {
   const blob = new Blob([logs.map(row => `${row.time} [${row.level}] ${row.message}`).join('\n')],{type:'text/plain;charset=utf-8'});
   const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href=url;anchor.download='padlet-session.log';anchor.click();setTimeout(() => URL.revokeObjectURL(url),1000);
 };
-window.addEventListener('pagehide', () => { generation++; $('remoteText').value=''; clearTimeout(pollTimer); clearTimeout(reconnectTimer); if (imageUrl) URL.revokeObjectURL(imageUrl); });
+window.addEventListener('pagehide', () => { generation++; closeStream(); $('remoteText').value=''; clearTimeout(pollTimer); clearTimeout(reconnectTimer); if (imageUrl) URL.revokeObjectURL(imageUrl); });
 window.addEventListener('pageshow', event => { if (event.persisted) connect(); });
 connect();

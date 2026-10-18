@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' https://*.onrender.com http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' https://*.onrender.com wss://*.onrender.com http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>Padlet Sender · Control Panel</title>
-  <link rel="stylesheet" href="./style.css?v=auto-session-1">
-  <script src="./config.js?v=auto-session-1" defer></script>
-  <script src="./app.js?v=auto-session-1" defer></script>
+  <link rel="stylesheet" href="./style.css?v=stream-1">
+  <script src="./config.js?v=stream-1" defer></script>
+  <script src="./app.js?v=stream-1" defer></script>
 </head>
 <body>
   <aside class="rail"><a class="brand" href="./" aria-label="Padlet Sender 홈">p<span>↗</span></a><div class="rail-label">CONTROL PANEL</div><span class="rail-bottom">PS / 01</span></aside>
@@ -43,6 +43,7 @@
       <div class="section-heading"><h2><span class="number">↗</span> 로그인 브라우저</h2><button id="resetBtn" type="button" class="text-btn danger">세션 종료</button></div>
       <p class="browser-description">아래 화면을 클릭해 로그인하고 게시물을 한 번 작성하세요. 입력할 칸을 클릭한 뒤 아래 입력창으로 글자를 보내거나 키보드를 사용하세요.</p>
       <div id="tabs" class="tabs"></div>
+      <p id="streamStatus" class="hint" role="status">화면 연결 중…</p>
       <div class="screen-wrap"><img id="screen" alt="서버에서 실행 중인 Padlet 브라우저" tabindex="0" draggable="false"><div id="screenPlaceholder">브라우저 화면을 불러오는 중…</div></div>
       <form id="typeForm" class="type-form"><input id="remoteText" aria-label="브라우저에 입력할 텍스트" type="password" autocomplete="off" placeholder="선택한 칸에 입력할 내용 (비밀번호 포함)"><button class="secondary" type="submit">텍스트 입력</button></form>
       <div class="keyboard"><button data-key="Tab">Tab</button><button data-key="Shift+Tab">Shift + Tab</button><button data-key="Control+a">전체 선택</button><button data-key="Backspace">⌫</button><button data-key="Enter">Enter ↵</button><button data-key="Escape">Esc</button><button data-scroll="-550">↑ 스크롤</button><button data-scroll="550">↓ 스크롤</button></div>

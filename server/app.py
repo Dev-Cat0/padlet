@@ -3,12 +3,13 @@ import os
 from contextlib import asynccontextmanager, suppress
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from .engine import Sender
 from .sessions import Sessions
+from .stream import browser_stream
 
 sessions = Sessions()
 allowed_origins = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "https://dev-cat0.github.io").split(",") if s.strip()]
@@ -78,6 +79,27 @@ class BrowserAction(BaseModel):
                  "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"] = "Enter"
     delta: int = Field(default=0, ge=-1500, le=1500)
     index: int = Field(default=0, ge=0, le=20)
+
+
+@app.websocket("/api/browser/stream")
+async def stream(socket: WebSocket):
+    if socket.headers.get("origin") not in allowed_origins:
+        await socket.close(code=1008)
+        return
+    await socket.accept()
+    try:
+        # Authenticate in the first message, never in URL/access logs.
+        raw = await asyncio.wait_for(socket.receive_text(), timeout=5)
+        if len(raw) > 1024:
+            raise ValueError()
+        import json
+        data = json.loads(raw)
+        sender = sessions.authorize("Bearer " + data["token"])
+    except (TimeoutError, ValueError, KeyError, TypeError, HTTPException, WebSocketDisconnect):
+        with suppress(Exception):
+            await socket.close(code=1008)
+        return
+    await browser_stream(socket, sender, BrowserAction)
 
 
 @app.get("/")
