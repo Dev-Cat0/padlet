@@ -1,5 +1,4 @@
 import asyncio
-import hmac
 import os
 from contextlib import asynccontextmanager, suppress
 from typing import Literal
@@ -9,32 +8,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from .engine import Sender
+from .sessions import Sessions
 
-sender = Sender()
+sessions = Sessions()
+allowed_origins = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "https://dev-cat0.github.io").split(",") if s.strip()]
 
 
 @asynccontextmanager
 async def lifespan(app):
-    cleanup = asyncio.create_task(sender.expire())
+    cleanup = asyncio.create_task(sessions.cleanup())
     yield
     cleanup.cancel()
     with suppress(asyncio.CancelledError):
         await cleanup
-    await sender.shutdown()
+    await sessions.shutdown()
 
 
 app = FastAPI(title="Padlet Sender", lifespan=lifespan, docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware,
-    allow_origins=[s.strip() for s in os.getenv("ALLOWED_ORIGINS", "https://dev-cat0.github.io").split(",") if s.strip()],
+    allow_origins=allowed_origins,
     allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
 
 
 async def authorize(authorization: str = Header(default="")):
-    token = os.getenv("PANEL_TOKEN", "")
-    if len(token) < 32:
-        raise HTTPException(503, "Render 환경변수 PANEL_TOKEN을 32자 이상으로 설정하세요.")
-    if not hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
-        raise HTTPException(401, "패널 접속 키를 확인하세요.")
+    return sessions.authorize(authorization)
+
+
+@app.post("/api/session")
+async def create_session(origin: str = Header(default="")):
+    if origin not in allowed_origins:
+        raise HTTPException(403, "웹 패널에서 연결하세요.")
+    return {"token": sessions.create()}
 
 
 @app.middleware("http")
@@ -82,30 +86,30 @@ async def health():
     return {"status": "ok", "app": "padlet-sender"}
 
 
-@app.get("/api/state", dependencies=[Depends(authorize)])
-async def state():
+@app.get("/api/state")
+async def state(sender: Sender = Depends(authorize)):
     return sender.status()
 
 
-@app.post("/api/browser/open", dependencies=[Depends(authorize)])
-async def open_browser(data: OpenRequest):
+@app.post("/api/browser/open")
+async def open_browser(data: OpenRequest, sender: Sender = Depends(authorize)):
     try:
-        await sender.open(data.url)
+        await sessions.open(sender, data.url)
     except ValueError as error:
         raise HTTPException(400, str(error)) from None
     return sender.status()
 
 
-@app.get("/api/browser/frame", dependencies=[Depends(authorize)])
-async def frame():
+@app.get("/api/browser/frame")
+async def frame(sender: Sender = Depends(authorize)):
     try:
         return Response(await sender.screenshot(), media_type="image/jpeg")
     except Exception:
         raise HTTPException(409, "브라우저가 닫혔거나 화면을 갱신 중입니다.") from None
 
 
-@app.get("/api/browser/tabs", dependencies=[Depends(authorize)])
-async def tabs():
+@app.get("/api/browser/tabs")
+async def tabs(sender: Sender = Depends(authorize)):
     pages = sender.context.pages if sender.context else []
     # Do not expose OAuth query strings or authorization codes.
     from urllib.parse import urlsplit
@@ -113,8 +117,8 @@ async def tabs():
             for i, p in enumerate(pages)]
 
 
-@app.post("/api/browser/action", dependencies=[Depends(authorize)])
-async def control(data: BrowserAction):
+@app.post("/api/browser/action")
+async def control(data: BrowserAction, sender: Sender = Depends(authorize)):
     try:
         await sender.control(data)
     except Exception:
@@ -122,8 +126,8 @@ async def control(data: BrowserAction):
     return {"ok": True}
 
 
-@app.post("/api/start", dependencies=[Depends(authorize)])
-async def start(data: SendRequest):
+@app.post("/api/start")
+async def start(data: SendRequest, sender: Sender = Depends(authorize)):
     try:
         await sender.start(data.subject, data.body, data.limit, data.delay)
     except ValueError as error:
@@ -131,14 +135,14 @@ async def start(data: SendRequest):
     return sender.status()
 
 
-@app.post("/api/stop", dependencies=[Depends(authorize)])
-async def stop():
+@app.post("/api/stop")
+async def stop(sender: Sender = Depends(authorize)):
     sender.stop()
     return sender.status()
 
 
-@app.post("/api/reset", dependencies=[Depends(authorize)])
-async def reset():
+@app.post("/api/reset")
+async def reset(sender: Sender = Depends(authorize)):
     try:
         await sender.reset()
     except ValueError as error:

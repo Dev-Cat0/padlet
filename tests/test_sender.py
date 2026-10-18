@@ -5,43 +5,105 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from server.app import app
+from server.app import app, sessions
 import server.engine as engine
 from server.engine import Sender, is_capture_url, make_payload, padlet_url
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.setenv("PANEL_TOKEN", "x" * 40)
+def client():
     with TestClient(app) as client:
         yield client
 
 
-def test_private_endpoints_fail_closed(client, monkeypatch):
+def session_auth(client):
+    response = client.post('/api/session', headers={'Origin':'https://dev-cat0.github.io'}, json={})
+    assert response.status_code == 200
+    return {'Authorization':'Bearer ' + response.json()['token']}
+
+
+def test_private_endpoints_fail_closed(client):
     assert client.get('/healthz').status_code == 200
     for route in ['/api/state', '/api/browser/frame', '/api/browser/tabs']:
         assert client.get(route).status_code == 401
     for route in ['/api/start', '/api/stop', '/api/reset', '/api/browser/open', '/api/browser/action']:
         assert client.post(route, json={}).status_code == 401
-    monkeypatch.delenv('PANEL_TOKEN')
-    assert client.get('/api/state').status_code == 503
+    assert client.get('/api/state', headers={'Authorization':'Bearer unknown-session'}).status_code == 401
 
 
 def test_state_hides_secrets_and_cors(client):
-    response = client.get('/api/state', headers={'Authorization':'Bearer ' + 'x'*40,'Origin':'https://dev-cat0.github.io'})
+    auth = session_auth(client)
+    response = client.get('/api/state', headers={**auth,'Origin':'https://dev-cat0.github.io'})
     assert response.status_code == 200
     assert response.headers['access-control-allow-origin'] == 'https://dev-cat0.github.io'
     assert response.headers['cache-control'] == 'no-store'
     assert not {'headers','template','endpoint'} & response.json().keys()
-    response = client.get('/api/state', headers={'Authorization':'Bearer ' + 'x'*40,'Origin':'https://evil.example'})
+    response = client.get('/api/state', headers={**auth,'Origin':'https://evil.example'})
     assert 'access-control-allow-origin' not in response.headers
 
 
 def test_start_validates_input_and_capture(client):
-    auth = {'Authorization':'Bearer ' + 'x'*40}
+    auth = session_auth(client)
     assert client.post('/api/start', headers=auth, json={'subject':'ok'}).status_code == 409
     for values in [{'subject':' '}, {'subject':'x','delay':-1}, {'subject':'x','limit':-1}, {'subject':'x','limit':1.5}]:
         assert client.post('/api/start', headers=auth, json=values).status_code == 422
+
+
+def test_automatic_sessions_are_isolated_and_resume(client):
+    first, second = session_auth(client), session_auth(client)
+    assert first != second
+    first_token = first['Authorization'].split()[1]
+    first_sender = sessions.items[first_token].sender
+    first_sender.ready = True
+    first_sender.template = {'subject':'private'}
+    first_sender.log('Only the first session should see this')
+    first_state = client.get('/api/state', headers=first).json()
+    second_state = client.get('/api/state', headers=second).json()
+    assert first_state['ready'] and len(first_state['logs']) == 1
+    assert not second_state['ready'] and not second_state['logs']
+    assert client.post('/api/reset', headers=second, json={}).status_code == 200
+    assert client.get('/api/state', headers=first).json()['ready']
+
+
+def test_session_creation_checks_origin_and_rate_limit(client):
+    assert client.post('/api/session', headers={'Origin':'https://evil.example'}, json={}).status_code == 403
+    for _ in range(20):
+        session_auth(client)
+    assert client.post('/api/session', headers={'Origin':'https://dev-cat0.github.io'}, json={}).status_code == 429
+
+
+def test_session_cleanup_expires_idle_but_keeps_running():
+    from server.sessions import Sessions
+    async def scenario():
+        registry = Sessions()
+        idle, active = registry.create(), registry.create()
+        registry.items[idle].last_seen -= 1900
+        registry.items[active].last_seen -= 1900
+        registry.items[active].sender.running = True
+        await registry.collect()
+        assert idle not in registry.items and active in registry.items
+        await registry.shutdown()
+    asyncio.run(scenario())
+
+
+def test_only_one_remote_browser_at_a_time():
+    from fastapi import HTTPException
+    from server.sessions import Sessions
+    async def scenario():
+        registry = Sessions()
+        first, second = registry.create(), registry.create()
+        registry.items[first].sender.opening = True
+        target = registry.items[second].sender
+        target.open = AsyncMock()
+        with pytest.raises(HTTPException) as error:
+            await registry.open(target, 'https://padlet.com/dashboard')
+        assert error.value.status_code == 429
+        target.open.assert_not_awaited()
+        registry.items[first].sender.opening = False
+        await registry.open(target, 'https://padlet.com/dashboard')
+        target.open.assert_awaited_once()
+        await registry.shutdown()
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize('url', ['http://padlet.com/a','https://padlet.com.evil.org/a','https://localhost/a','https://padlet.com:123/a','https://user:password@padlet.com/a'])

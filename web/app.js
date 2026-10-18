@@ -3,6 +3,8 @@ const $ = id => document.getElementById(id);
 const base = window.PADLET_CONFIG.serverUrl;
 let token = "", connected = false, state = null, logs = [], lastLog = 0;
 let generation = 0, imageUrl = null, pollTimer = null, frameBusy = false, actionQueue = Promise.resolve();
+let reconnectTimer = null;
+try { token = sessionStorage.getItem('padlet-session') || ''; } catch (_) { /* Memory-only fallback. */ }
 const phases = {waiting:"시작 대기",opening:"브라우저 실행 중",capturing:"로그인·게시 요청 대기",ready:"캡처 완료",sending:"전송 중",backoff:"요청 제한 · 대기 중",stopping:"중지 중 · 진행 중인 요청 완료 대기",stopped:"사용자 중지",finished:"전송 완료",error:"오류 확인 필요"};
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
 async function api(path, data, asBlob = false) {
@@ -11,7 +13,9 @@ async function api(path, data, asBlob = false) {
     body:data === undefined ? undefined:JSON.stringify(data), signal:AbortSignal.timeout(path.endsWith('/open') ? 90000:20000), cache:'no-store'});
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
-    throw new Error(typeof detail.detail === 'string' ? detail.detail : `요청 실패 (HTTP ${res.status})`);
+    const error = new Error(typeof detail.detail === 'string' ? detail.detail : `요청 실패 (HTTP ${res.status})`);
+    error.status = res.status;
+    throw error;
   }
   return asBlob ? res.blob() : res.json();
 }
@@ -34,7 +38,6 @@ function render(next) {
   $('stopBtn').disabled = !connected || !next.running || next.phase === 'stopping';
   $('clearSession').disabled = !connected || next.opening;
   $('resetBtn').disabled = next.opening;
-  $('connectBtn').disabled = next.running || next.opening;
   $('targetUrl').disabled = next.running || next.opening;
   for (const id of ['subject','body','limit','delay']) $(id).disabled = next.running;
   $('browserSection').hidden = !next.browser && !next.opening;
@@ -94,23 +97,41 @@ async function poll(current) {
     $('connectionBadge').textContent = '● 연결 재시도 중'; $('connectionBadge').classList.remove('connected');
     notice(networkMessage(error));
     $('openBtn').disabled = $('startBtn').disabled = true;
-    $('connectBtn').disabled = false;
+    if (error.status === 401) { forgetSession(); connect(); return; }
   }
   if (current === generation) pollTimer = setTimeout(() => poll(current), document.hidden ? 4000:1200);
 }
-$('connectForm').addEventListener('submit', async event => {
-  event.preventDefault(); notice();
-  if (state?.running) return;
+function forgetSession() {
+  token = '';
+  try { sessionStorage.removeItem('padlet-session'); } catch (_) {}
+}
+async function connect() {
+  clearTimeout(reconnectTimer);
   clearTimeout(pollTimer); generation++; connected = false;
+  const current = generation;
+  $('connectionBadge').textContent = '● 자동 연결 중';
+  $('connectionBadge').classList.remove('connected');
+  $('openBtn').disabled = $('startBtn').disabled = true;
   try {
-    token = $('token').value;
-    $('connectBtn').disabled = true; $('connectBtn').textContent = '연결 중…';
+    if (!token) {
+      const session = await api('/api/session', {});
+      token = session.token;
+      try { sessionStorage.setItem('padlet-session', token); } catch (_) {}
+      lastLog = 0; logs = []; $('log').replaceChildren();
+    }
     const next = await api('/api/state');
-    connected = true; lastLog = 0; $('log').replaceChildren();
+    if (current !== generation) return;
+    connected = true; notice();
     render(next); poll(generation);
-  } catch (error) { notice(networkMessage(error)); $('connectionBadge').textContent = '● 연결 실패'; $('connectionBadge').classList.remove('connected'); }
-  finally { $('connectBtn').disabled = false; $('connectBtn').textContent = '서버 연결 ↗'; }
-});
+  } catch (error) {
+    if (current !== generation) return;
+    if (error.status === 401) forgetSession();
+    $('connectionBadge').textContent = '● 자동 재연결 중';
+    $('actionHint').textContent = '서버가 준비되면 자동으로 연결됩니다.';
+    notice(networkMessage(error));
+    reconnectTimer = setTimeout(connect, error.status === 401 ? 100:5000);
+  }
+}
 $('captureForm').addEventListener('submit', async event => {
   event.preventDefault(); notice(); $('openBtn').disabled = true;
   try {
@@ -163,4 +184,6 @@ $('downloadLog').onclick = () => {
   const blob = new Blob([logs.map(row => `${row.time} [${row.level}] ${row.message}`).join('\n')],{type:'text/plain;charset=utf-8'});
   const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href=url;anchor.download='padlet-session.log';anchor.click();setTimeout(() => URL.revokeObjectURL(url),1000);
 };
-window.addEventListener('pagehide', () => { token=''; $('token').value=''; $('remoteText').value=''; clearTimeout(pollTimer); if (imageUrl) URL.revokeObjectURL(imageUrl); });
+window.addEventListener('pagehide', () => { generation++; $('remoteText').value=''; clearTimeout(pollTimer); clearTimeout(reconnectTimer); if (imageUrl) URL.revokeObjectURL(imageUrl); });
+window.addEventListener('pageshow', event => { if (event.persisted) connect(); });
+connect();

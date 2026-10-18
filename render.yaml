@@ -11,7 +11,5 @@ services:
     dockerContext: .
     healthCheckPath: /healthz
     envVars:
-      - key: PANEL_TOKEN
-        generateValue: true
       - key: ALLOWED_ORIGINS
         value: https://dev-cat0.github.io
