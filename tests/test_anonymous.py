@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from server.anonymous import build_template, prepare
+from server.anonymous import build_template, prepare, check_response
 from server.engine import Sender
 import server.engine as engine
 
@@ -60,6 +60,11 @@ def test_moderated_board_does_not_publish_directly():
     state = deepcopy(STATE)
     state['wall']['require_approval'] = True
     assert build_template(state)['published'] is False
+
+
+def test_security_challenge_is_reported_without_retry():
+    with pytest.raises(ValueError, match='보안 확인'):
+        check_response(response(403, headers={'cf-mitigated': 'challenge'}), '게시판 페이지 조회')
 
 
 @pytest.mark.parametrize('location', ['https://evil.example/board', 'http://padlet.com/a/b',

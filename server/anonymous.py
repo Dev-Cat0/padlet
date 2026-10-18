@@ -24,9 +24,13 @@ class MetaParser(HTMLParser):
             self.token = attrs.get("content", "")
 
 
-def check_response(response):
+def check_response(response, stage):
     if response.status_code != 200:
-        raise ValueError(f"게시판 연결 실패 (HTTP {response.status_code}). 익명 접근 권한을 확인하세요.")
+        if response.headers.get("cf-mitigated") == "challenge":
+            raise ValueError(f"{stage}: Padlet이 서버에 보안 확인을 요구합니다 (HTTP {response.status_code}). 현재 서버에서 직접 연결할 수 없습니다.")
+        if response.status_code == 403:
+            raise ValueError(f"{stage}: Padlet이 서버 요청을 거부했습니다 (HTTP 403). 익명 쓰기 허용과 별개로 서버 접근이 제한될 수 있습니다.")
+        raise ValueError(f"{stage} 실패 (HTTP {response.status_code}). 익명 접근 권한을 확인하세요.")
     if len(response.content) > 3_000_000:
         raise ValueError("게시판 응답이 너무 큽니다.")
 
@@ -63,7 +67,7 @@ async def prepare(session, value):
         if response.status_code not in {301, 302, 303, 307, 308}:
             break
         url = padlet_url(urljoin(url, response.headers.get("location", "")))
-    check_response(response)
+    check_response(response, "게시판 페이지 조회")
     parser = MetaParser()
     parser.feed(response.text)
     if not parser.token:
@@ -77,7 +81,7 @@ async def prepare(session, value):
     }
     response = await session.get(origin + "/api/11/padlet-starting-state" + urlsplit(url).path,
                                  headers=headers, allow_redirects=False)
-    check_response(response)
+    check_response(response, "익명 권한 조회")
     try:
         state = response.json()
         if not isinstance(state, dict):
