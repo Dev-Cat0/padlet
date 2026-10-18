@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from server.app import app, sessions
 import server.engine as engine
-from server.engine import Sender, is_capture_url, make_payload, padlet_url
+from server.engine import Sender, make_payload, padlet_url
 
 
 @pytest.fixture
@@ -24,9 +24,9 @@ def session_auth(client):
 
 def test_private_endpoints_fail_closed(client):
     assert client.get('/healthz').status_code == 200
-    for route in ['/api/state', '/api/browser/frame', '/api/browser/tabs']:
+    for route in ['/api/state']:
         assert client.get(route).status_code == 401
-    for route in ['/api/start', '/api/stop', '/api/reset', '/api/browser/open', '/api/browser/action']:
+    for route in ['/api/start', '/api/stop', '/api/reset', '/api/board/connect']:
         assert client.post(route, json={}).status_code == 401
     assert client.get('/api/state', headers={'Authorization':'Bearer unknown-session'}).status_code == 401
 
@@ -86,36 +86,10 @@ def test_session_cleanup_expires_idle_but_keeps_running():
     asyncio.run(scenario())
 
 
-def test_only_one_remote_browser_at_a_time():
-    from fastapi import HTTPException
-    from server.sessions import Sessions
-    async def scenario():
-        registry = Sessions()
-        first, second = registry.create(), registry.create()
-        registry.items[first].sender.opening = True
-        target = registry.items[second].sender
-        target.open = AsyncMock()
-        with pytest.raises(HTTPException) as error:
-            await registry.open(target, 'https://padlet.com/dashboard')
-        assert error.value.status_code == 429
-        target.open.assert_not_awaited()
-        registry.items[first].sender.opening = False
-        await registry.open(target, 'https://padlet.com/dashboard')
-        target.open.assert_awaited_once()
-        await registry.shutdown()
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize('url', ['http://padlet.com/a','https://padlet.com.evil.org/a','https://localhost/a','https://padlet.com:123/a','https://user:password@padlet.com/a'])
 def test_target_rejects_other_hosts(url):
     with pytest.raises(ValueError):
         padlet_url(url)
-
-
-def test_capture_endpoint_exact_match():
-    assert is_capture_url('https://padlet.com/api/9/wishes')
-    assert not is_capture_url('https://evil.org/api/9/wishes')
-    assert not is_capture_url('https://padlet.com/anything?api/9/wishes')
 
 
 def test_payload_escapes_text_preserves_template():
@@ -132,6 +106,7 @@ class FakeSession:
     def __init__(self, outcomes):
         self.outcomes = iter(outcomes)
         self.calls = []
+    async def close(self): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *args): pass
     async def post(self, url, **kwargs):
@@ -145,7 +120,7 @@ def test_finite_send_and_rate_limit(monkeypatch):
     async def scenario():
         sender = Sender()
         session = FakeSession([201,429,201])
-        monkeypatch.setattr(engine, 'AsyncSession', lambda **kwargs: session)
+        sender.http = session
         sender.wait = AsyncMock(return_value=False)
         sender.ready = True
         sender.endpoint = 'https://padlet.com/api/9/wishes'
@@ -164,7 +139,7 @@ def test_stop_unlimited_during_wait(monkeypatch):
     async def scenario():
         sender = Sender()
         session = FakeSession([])
-        monkeypatch.setattr(engine, 'AsyncSession', lambda **kwargs: session)
+        sender.http = session
         sender.ready = True
         await sender.start('Title', '', 0, 300)
         await asyncio.sleep(.01)
@@ -180,26 +155,11 @@ def test_error_stops_without_unsafe_retry(monkeypatch, result):
     async def scenario():
         sender = Sender()
         session = FakeSession([result])
-        monkeypatch.setattr(engine, 'AsyncSession', lambda **kwargs: session)
+        sender.http = session
         sender.wait = AsyncMock(return_value=False)
         sender.ready = True
         await sender.start('Title', '', 0, .3)
         await sender.worker
         assert not sender.running and sender.phase == 'error'
         assert sender.errors == 1 and len(session.calls) == 1
-    asyncio.run(scenario())
-
-
-def test_capture_success_filters_transport_and_preserves_cookie():
-    async def scenario():
-        sender = Sender()
-        sender.close_browser = AsyncMock()
-        request = SimpleNamespace(method='POST',post_data='{"subject":"test","wall_id":123}',
-            all_headers=AsyncMock(return_value={'cookie':'private','host':'padlet.com','content-length':'12'}))
-        response = SimpleNamespace(request=request,status=201,url='https://padlet.com/api/9/wishes')
-        await sender.capture(response, sender.generation)
-        assert sender.ready and sender.headers == {'cookie':'private'}
-        assert 'private' not in str(sender.status())
-        assert sender.template['wall_id'] == 123
-        sender.close_browser.assert_awaited_once()
     asyncio.run(scenario())

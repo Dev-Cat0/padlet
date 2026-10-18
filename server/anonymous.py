@@ -1,0 +1,91 @@
+"""Read-only anonymous initialization using Padlet's public web client protocol."""
+import re
+import secrets
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+
+def padlet_url(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    if (parsed.scheme != "https" or parsed.hostname not in {"padlet.com", "www.padlet.com"}
+            or parsed.username or parsed.password or parsed.port not in {None, 443}
+            or not re.fullmatch(r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)?/?", parsed.path)
+            or parsed.path.strip("/").split("/")[0] in {"api", "dashboard", "auth", "login"}):
+        raise ValueError("https://padlet.com/사용자/게시판 형식의 게시판 주소를 입력하세요.")
+    return urlunsplit(("https", parsed.hostname, parsed.path.rstrip("/"), "", ""))
+
+
+class MetaParser(HTMLParser):
+    token = ""
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "meta" and attrs.get("name") == "csrf-token":
+            self.token = attrs.get("content", "")
+
+
+def check_response(response):
+    if response.status_code != 200:
+        raise ValueError(f"게시판 연결 실패 (HTTP {response.status_code}). 익명 접근 권한을 확인하세요.")
+    if len(response.content) > 3_000_000:
+        raise ValueError("게시판 응답이 너무 큽니다.")
+
+
+def build_template(state):
+    wall, user = state.get("wall") or {}, state.get("user") or {}
+    if state.get("canIWrite") is not True or state.get("isReadOnly") or wall.get("frozen"):
+        raise ValueError("이 게시판은 현재 익명 글쓰기를 허용하지 않습니다.")
+    if user.get("registered_at") or user.get("username") or user.get("email"):
+        raise ValueError("익명 방문자 세션을 확인할 수 없습니다.")
+    if wall.get("is_archived") or wall.get("is_trashed"):
+        raise ValueError("보관되었거나 삭제된 게시판입니다.")
+    if not all(type(obj.get("id")) is int and obj["id"] > 0 and obj.get("hashid") for obj in (wall, user)):
+        raise ValueError("게시판 응답 형식이 변경되었습니다. 연결 정보를 확인할 수 없습니다.")
+    template = {
+        "wall_id": wall["id"], "wall_hashid": wall["hashid"],
+        "author_id": user["id"], "author_hashid": user["hashid"],
+        "attachment": "", "attachment_caption": None, "width": 256,
+        "published": not bool(wall.get("require_approval")),
+    }
+    section = (wall.get("wish_arrangement") or {}).get("default_section_id")
+    if section:
+        template["wall_section_id"] = section
+    if wall.get("viz") == "free":
+        template.update(left=16, top=16)
+    return template
+
+
+async def prepare(session, value):
+    """GET only: never create a test post to initialize a sender."""
+    url = padlet_url(value)
+    for _ in range(4):
+        response = await session.get(url, allow_redirects=False)
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            break
+        url = padlet_url(urljoin(url, response.headers.get("location", "")))
+    check_response(response)
+    parser = MetaParser()
+    parser.feed(response.text)
+    if not parser.token:
+        raise ValueError("익명 세션을 만들 수 없습니다. 로그인·보안 확인이 필요한 게시판은 지원하지 않습니다.")
+    origin = "https://" + urlsplit(url).hostname
+    headers = {
+        "Accept": "application/json, application/vnd.api+json",
+        "Content-Type": "application/json; charset=utf-8",
+        "X-CSRF-Token": parser.token, "X-UID": secrets.token_hex(16),
+        "Origin": origin, "Referer": url,
+    }
+    response = await session.get(origin + "/api/11/padlet-starting-state" + urlsplit(url).path,
+                                 headers=headers, allow_redirects=False)
+    check_response(response)
+    try:
+        state = response.json()
+        if not isinstance(state, dict):
+            raise TypeError()
+        template = build_template(state)
+    except (TypeError, KeyError, AttributeError):
+        raise ValueError("게시판 응답 형식이 변경되었습니다. 연결 정보를 확인할 수 없습니다.") from None
+    return origin + "/api/9/wishes", headers, template, {
+        "url": url, "title": str(state["wall"].get("title") or "익명 게시판"),
+        "approval_required": not template["published"],
+    }
