@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' https://*.onrender.com http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Padlet Sender · Control Panel</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./config.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <aside class="rail"><a class="brand" href="./" aria-label="Padlet Sender 홈">p<span>↗</span></a><div class="rail-label">CONTROL PANEL</div><span class="rail-bottom">PS / 01</span></aside>
+  <main>
+    <header><div class="breadcrumb">WORKSPACE <span>/</span> PADLET SENDER</div><span id="connectionBadge" class="badge">● 연결 안 됨</span></header>
+    <section class="intro"><div><p class="eyebrow">YOUR BOARD. YOUR CONTROL.</p><h1>Padlet Sender<span>↗</span></h1><p class="subtitle">브라우저에서 캡처하고, 패널에서 전송하세요.</p></div><span class="version">WEB PANEL <b>01</b></span></section>
+    <div id="notice" class="notice" role="alert" hidden></div>
+    <section class="connection card">
+      <div class="section-heading"><h2><span class="number">01</span> 서버 연결</h2><span class="micro">RENDER CONNECTION</span></div>
+      <form id="connectForm" class="connection-grid">
+        <label>서버 주소<input id="serverUrl" type="url" placeholder="https://your-server.onrender.com" required autocomplete="url"></label>
+        <label>패널 접속 키<input id="token" type="password" placeholder="Render의 PANEL_TOKEN" required minlength="32" autocomplete="off"></label>
+        <button id="connectBtn" class="secondary" type="submit">서버 연결 <span>↗</span></button>
+      </form>
+      <p class="hint">접속 키는 이 페이지를 닫으면 사라집니다. 첫 연결 시 서버가 깨어날 때까지 시간이 걸릴 수 있습니다.</p>
+    </section>
+    <div class="workspace-grid">
+      <section class="card composer">
+        <div class="section-heading"><h2><span class="number">02</span> 전송 설정</h2><span id="captureBadge" class="small-status">캡처 대기</span></div>
+        <form id="captureForm"><label>대상 게시판<input id="targetUrl" type="url" required placeholder="https://padlet.com/..."></label><button id="openBtn" class="browser-btn" disabled type="submit"><span>▣</span> 브라우저 열기 & 로그인 <span>↗</span></button></form>
+        <div class="divider"></div>
+        <form id="sendForm">
+          <label>제목<input id="subject" required maxlength="1000" placeholder="게시물 제목을 입력하세요"></label>
+          <label>본문<textarea id="body" rows="5" maxlength="20000" placeholder="게시할 내용을 입력하세요."></textarea></label>
+          <div class="split"><label>전송 횟수<input id="limit" type="number" min="0" max="1000000" step="1" value="50" required><span class="hint">0을 입력하면 무제한</span></label><label>전송 간격 <span class="unit">초</span><input id="delay" type="number" min="0" max="86400" step="any" value="0.3" required><span class="hint">요청 제한 시 자동 대기</span></label></div>
+          <div class="actions"><button id="startBtn" type="submit" class="primary" disabled>▶ 전송 시작</button><button id="stopBtn" type="button" class="stop" disabled>■ 중지</button></div>
+        </form>
+        <p id="actionHint" class="hint">서버에 연결한 후 브라우저를 열어 주세요.</p>
+      </section>
+      <section class="card monitor">
+        <div class="section-heading"><h2><span class="number">03</span> 실행 현황</h2><span class="micro"><span id="liveDot" class="dot"></span> LIVE</span></div>
+        <div class="stats"><div><span>전송 성공</span><strong id="sentCount">0</strong><small>SUCCESSFUL</small></div><div><span>오류</span><strong id="errorCount">0</strong><small>ERRORS</small></div></div>
+        <div class="progress-label"><span id="phase">시작 대기</span><span id="progressText">—</span></div><progress id="progress" max="100" value="0" aria-label="전송 진행률"></progress>
+        <div class="log-heading"><h3>활동 로그</h3><button id="downloadLog" class="text-btn" type="button">↓ 저장</button></div>
+        <div id="log" class="log" role="log" aria-live="polite"><div class="empty-log"><span>⌁</span><p>아직 실행 기록이 없습니다.</p><small>서버에 연결하면 활동이 여기에 표시됩니다.</small></div></div>
+        <div class="log-footer"><span id="logCount">0 EVENTS</span><span>SESSION ONLY</span></div>
+      </section>
+    </div>
+    <section id="browserSection" class="card browser-section" hidden>
+      <div class="section-heading"><h2><span class="number">↗</span> 로그인 브라우저</h2><button id="resetBtn" type="button" class="text-btn danger">세션 종료</button></div>
+      <p class="browser-description">아래 화면을 클릭해 로그인하고 게시물을 한 번 작성하세요. 입력할 칸을 클릭한 뒤 아래 입력창으로 글자를 보내거나 키보드를 사용하세요.</p>
+      <div id="tabs" class="tabs"></div>
+      <div class="screen-wrap"><img id="screen" alt="서버에서 실행 중인 Padlet 브라우저" tabindex="0" draggable="false"><div id="screenPlaceholder">브라우저 화면을 불러오는 중…</div></div>
+      <form id="typeForm" class="type-form"><input id="remoteText" aria-label="브라우저에 입력할 텍스트" type="password" autocomplete="off" placeholder="선택한 칸에 입력할 내용 (비밀번호 포함)"><button class="secondary" type="submit">텍스트 입력</button></form>
+      <div class="keyboard"><button data-key="Tab">Tab</button><button data-key="Shift+Tab">Shift + Tab</button><button data-key="Control+a">전체 선택</button><button data-key="Backspace">⌫</button><button data-key="Enter">Enter ↵</button><button data-key="Escape">Esc</button><button data-scroll="-550">↑ 스크롤</button><button data-scroll="550">↓ 스크롤</button></div>
+      <p class="hint">팝업 로그인은 위 탭에서 선택할 수 있습니다. 캡처가 완료되면 브라우저가 자동으로 닫힙니다.</p>
+    </section>
+    <footer><span><i class="dot"></i> PADLET SENDER <span class="muted">/ WEB EDITION</span></span><button id="clearSession" class="text-btn" disabled>로그인·캡처 정보 삭제</button></footer>
+  </main>
+</body>
+</html>

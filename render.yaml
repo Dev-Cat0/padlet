@@ -1,0 +1,17 @@
+# Optional alternative to the directly created service; do not deploy a duplicate.
+services:
+  - type: web
+    name: padlet-sender-panel
+    runtime: docker
+    plan: free
+    region: singapore
+    repo: https://github.com/Dev-Cat0/padlet
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: PANEL_TOKEN
+        generateValue: true
+      - key: ALLOWED_ORIGINS
+        value: https://dev-cat0.github.io

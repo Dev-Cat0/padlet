@@ -1,0 +1,17 @@
+name: Server checks
+on:
+  push:
+    paths: ['server/**', 'tests/**', 'requirements*.txt', '.github/workflows/test.yml']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
