@@ -59,6 +59,32 @@ def build_template(state):
     return template
 
 
+async def read_sections(session, origin, headers, wall_id):
+    response = await session.get(origin + "/api/5/wall_sections",
+                                 params={"wall_id": wall_id}, headers=headers, allow_redirects=False)
+    check_response(response, "섹션 목록 조회")
+    try:
+        rows = response.json()["data"]
+        if not isinstance(rows, list):
+            raise TypeError()
+        sections, seen = [], set()
+        for row in rows:
+            item = row["attributes"]
+            section_id = item["id"]
+            if type(section_id) is not int or section_id <= 0:
+                raise TypeError()
+            if item.get("wall_id", wall_id) != wall_id:
+                raise ValueError("다른 게시판의 섹션이 반환되어 연결을 중단했습니다.")
+            if section_id in seen:
+                continue
+            seen.add(section_id)
+            sections.append({"id": section_id, "hashid": item.get("hashid"),
+                             "title": str(item.get("title") or "기본 섹션")})
+        return sections
+    except (TypeError, KeyError, AttributeError):
+        raise ValueError("섹션 목록을 확인할 수 없습니다. 게시판에 다시 연결하세요.") from None
+
+
 async def prepare(session, value):
     """GET only: never create a test post to initialize a sender."""
     url = padlet_url(value)
@@ -89,7 +115,8 @@ async def prepare(session, value):
         template = build_template(state)
     except (TypeError, KeyError, AttributeError):
         raise ValueError("게시판 응답 형식이 변경되었습니다. 연결 정보를 확인할 수 없습니다.") from None
+    sections = await read_sections(session, origin, headers, template["wall_id"])
     return origin + "/api/9/wishes", headers, template, {
         "url": url, "title": str(state["wall"].get("title") or "익명 게시판"),
-        "approval_required": not template["published"],
+        "approval_required": not template["published"], "sections": sections,
     }

@@ -7,9 +7,9 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' https://*.onrender.com http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>Padlet Sender · Control Panel</title>
-  <link rel="stylesheet" href="./style.css?v=anonymous-1">
-  <script src="./config.js?v=anonymous-1" defer></script>
-  <script src="./app.js?v=anonymous-1" defer></script>
+  <link rel="stylesheet" href="./style.css?v=all-sections-1">
+  <script src="./config.js?v=all-sections-1" defer></script>
+  <script src="./app.js?v=all-sections-1" defer></script>
 </head>
 <body>
   <aside class="rail"><a class="brand" href="./" aria-label="Padlet Sender 홈">p<span>↗</span></a><div class="rail-label">CONTROL PANEL</div><span class="rail-bottom">PS / 01</span></aside>
@@ -21,12 +21,12 @@
       <section class="card composer">
         <div class="section-heading"><h2><span class="number">01</span> 전송 설정</h2><span id="captureBadge" class="small-status">게시판 연결 대기</span></div>
         <form id="captureForm"><label>대상 게시판<input id="targetUrl" type="url" required placeholder="https://padlet.com/..."></label><button id="openBtn" class="board-btn" disabled type="submit"><span>▣</span> 익명 게시판 연결 <span>↗</span></button></form>
-        <div id="boardInfo" class="board-info" hidden><strong id="boardTitle"></strong><span id="boardDetail"></span></div>
+        <div id="boardInfo" class="board-info" hidden><strong id="boardTitle"></strong><span id="boardDetail"></span><span id="sectionNames"></span></div>
         <div class="divider"></div>
         <form id="sendForm">
           <label>제목<input id="subject" required maxlength="1000" placeholder="게시물 제목을 입력하세요"></label>
           <label>본문<textarea id="body" rows="5" maxlength="20000" placeholder="게시할 내용을 입력하세요."></textarea></label>
-          <div class="split"><label>전송 횟수<input id="limit" type="number" min="0" max="1000000" step="1" value="50" required><span class="hint">0을 입력하면 무제한</span></label><label>전송 간격 <span class="unit">초</span><input id="delay" type="number" min="0" max="86400" step="any" value="0.3" required><span class="hint">요청 제한 시 자동 대기</span></label></div>
+          <div class="split"><label>섹션당 반복 횟수<input id="limit" type="number" min="0" max="1000000" step="1" value="50" required><span class="hint">1회 = 모든 섹션에 각 1건 · 0은 무제한</span></label><label>반복 주기 <span class="unit">초</span><input id="delay" type="number" min="0" max="86400" step="any" value="0.3" required><span class="hint">응답이 늦거나 요청 제한 시 지연될 수 있음</span></label></div>
           <div class="actions"><button id="startBtn" type="submit" class="primary" disabled>▶ 전송 시작</button><button id="stopBtn" type="button" class="stop" disabled>■ 중지</button></div>
         </form>
         <p id="actionHint" class="hint">서버에 자동으로 연결하고 있습니다. 잠시만 기다려 주세요.</p>

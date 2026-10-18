@@ -41,12 +41,15 @@ function render(next) {
   for (const id of ['subject','body','limit','delay']) $(id).disabled = next.running;
   $('boardInfo').hidden = !next.board;
   $('boardTitle').textContent = next.board?.title || '';
-  $('boardDetail').textContent = next.board?.approval_required ? '익명 작성 · 관리자 승인 필요' : '익명 작성 · 기본 섹션에 게시';
+  const sections = next.board?.sections || [];
+  const scope = sections.length ? `모든 ${sections.length}개 섹션에 각각 전송` : '섹션 없는 게시판 · 매 주기 1건 전송';
+  $('boardDetail').textContent = `${scope}${next.board?.approval_required ? ' · 관리자 승인 필요' : ''}`;
+  $('sectionNames').textContent = sections.map(section => section.title).join(' · ');
   if (next.board && !needsConnect && !$('targetUrl').value) $('targetUrl').value = next.board.url;
-  $('actionHint').textContent = next.running ? '중지를 누르면 현재 요청이 끝난 후 멈춥니다.' : needsConnect ? '주소가 변경되었습니다. 게시판에 다시 연결하세요.' : next.ready ? '준비 완료. 전송 시작을 누르면 실제 게시물이 작성됩니다.' : '게시판 주소를 입력하고 연결하세요. 연결만으로 글이 게시되지는 않습니다.';
+  $('actionHint').textContent = next.running ? '중지를 누르면 현재 요청이 끝난 후 멈춥니다.' : needsConnect ? '주소가 변경되었습니다. 게시판에 다시 연결하세요.' : next.ready ? `준비 완료. 매 주기 ${sections.length || 1}건을 게시합니다. 섹션 변경 후에는 다시 연결하세요.` : '게시판 주소를 입력하고 연결하세요. 연결만으로 글이 게시되지는 않습니다.';
   if (next.limit > 0) {
-    $('progress').value = Math.min(next.sent / next.limit * 100, 100);
-    $('progressText').textContent = `${next.sent} / ${next.limit}`;
+    $('progress').value = Math.min((next.rounds || 0) / next.limit * 100, 100);
+    $('progressText').textContent = `${next.rounds || 0} / ${next.limit}회 · ${next.sent} / ${next.limit * (next.target_count || 1)}건`;
   } else {
     $('progress').value = 0;
     $('progressText').textContent = next.running ? '∞ 무제한':'—';
