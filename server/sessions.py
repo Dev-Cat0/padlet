@@ -52,11 +52,6 @@ class Sessions:
         now = time.monotonic()
         for token, session in list(self.items.items()):
             sender = session.sender
-            if sender.pc.active and not sender.pc.connected:
-                sender.pc.cancel()
-                sender.opening = False
-                sender.phase = "error"
-                sender.log("PC 도우미 연결이 끊겼습니다. 도우미를 다시 연결하세요.", "warning")
             if sender.running or sender.opening:
                 continue
             if now - session.last_seen > 1800:

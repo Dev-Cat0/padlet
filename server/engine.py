@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright
-from .pc import PCLink
 
 
 def padlet_url(value: str) -> str:
@@ -65,7 +64,6 @@ class Sender:
         self.dns_cache = {}
         self.dns_pending = {}
         self.stream_socket = None
-        self.pc = PCLink()
 
     def log(self, message, level="info"):
         self.sequence += 1
@@ -74,7 +72,6 @@ class Sender:
 
     def status(self):
         return {"ready": self.ready, "running": self.running, "opening": self.opening,
-                "pc_connected": self.pc.connected, "pc_active": self.pc.active,
                 "browser": self.page is not None and not self.page.is_closed(),
                 "phase": self.phase, "sent": self.sent, "errors": self.errors,
                 "limit": self.limit, "logs": list(self.logs)}
@@ -307,9 +304,6 @@ class Sender:
 
     async def reset(self):
         async with self.lock:
-            if self.pc.active:
-                self.pc.cancel()
-                self.opening = False
             if self.opening:
                 raise ValueError("브라우저 실행이 끝난 후 다시 시도하세요.")
             self.stop()
@@ -330,7 +324,6 @@ class Sender:
                     self.log("30분 동안 조작이 없어 세션을 종료했습니다.")
 
     async def shutdown(self):
-        self.pc.cancel()
         self.stop()
         if self.worker and not self.worker.done():
             await self.worker
