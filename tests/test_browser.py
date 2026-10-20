@@ -69,7 +69,8 @@ def test_capture_preserves_successful_payload_and_retains_browser(monkeypatch):
         payload = {"wall_id": 12, "author_id": 30, "body": "<p><strong>rich</strong></p>",
                    "subject": "sample", "published": False, "custom_properties": {"photo": {"asset_id": 4}}}
         http = SimpleNamespace(origin="https://padlet.com", get=AsyncMock(return_value=response(data={
-            "canIWrite": True, "wall": {"id": 12, "title": "Board", "require_approval": True}})),
+            "canIWrite": True, "wall": {"id": 12, "hashid": "board", "title": "Board", "require_approval": True},
+            "user": {"id": 30, "hashid": "anon", "registered_at": None}})),
             close=AsyncMock())
         monkeypatch.setattr("server.engine.BrowserHTTP", lambda *args: http)
         monkeypatch.setattr("server.engine.read_sections", AsyncMock(return_value=[]))
@@ -90,10 +91,11 @@ def test_capture_rejects_different_board(monkeypatch):
         sender = Sender()
         sender.browser = BrowserSession(sender)
         http = SimpleNamespace(origin="https://padlet.com", get=AsyncMock(return_value=response(data={
-            "canIWrite": True, "wall": {"id": 99}})))
+            "canIWrite": True, "wall": {"id": 99, "hashid": "board"},
+            "user": {"id": 30, "hashid": "anon", "registered_at": None}})))
         monkeypatch.setattr("server.engine.BrowserHTTP", lambda *args: http)
         with pytest.raises(ValueError, match="게시판"):
-            await sender.capture_browser(sender.browser, page(), ENDPOINT, {"wall_id": 12})
+            await sender.capture_browser(sender.browser, page(), ENDPOINT, {"wall_id": 12, "author_id": 30})
         assert not sender.ready and not sender.opening
         assert sender.http is None
     asyncio.run(scenario())
@@ -113,6 +115,23 @@ def test_manual_capture_ignores_failure_and_non_creation():
             json=AsyncMock(return_value={"data": {"id": 5}}))
         await browser.capture(result)
         sender.capture_browser.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("user", [
+    {"id": 30, "hashid": "account", "registered_at": "2026-01-01"},
+    {"id": 30, "hashid": "account", "username": "user"},
+])
+def test_legacy_browser_also_refuses_logged_in_capture(monkeypatch, user):
+    async def scenario():
+        sender = Sender()
+        sender.browser = BrowserSession(sender)
+        http = SimpleNamespace(origin="https://padlet.com", get=AsyncMock(return_value=response(data={
+            "canIWrite": True, "wall": {"id": 12, "hashid": "board"}, "user": user})))
+        monkeypatch.setattr("server.engine.BrowserHTTP", lambda *args: http)
+        with pytest.raises(ValueError, match="익명"):
+            await sender.capture_browser(sender.browser, page(), ENDPOINT, {"wall_id": 12, "author_id": 30})
+        assert not sender.ready
     asyncio.run(scenario())
 
 

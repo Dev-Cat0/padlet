@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 from curl_cffi.requests import AsyncSession
-from .anonymous import padlet_url, prepare, check_response, read_sections
+from .anonymous import padlet_url, prepare, check_response, read_sections, build_template
 from .browser import BrowserSession, BrowserHTTP, created_post
 from .errors import rejection_message
 from .fields import validate_fields, read_fields
@@ -121,6 +121,9 @@ class Sender:
                 check_response(response, "게시판 상태 조회")
                 state = response.json()
                 wall = state.get("wall") or {}
+                anonymous = build_template(state)
+                if payload.get("author_id") != anonymous["author_id"]:
+                    raise ValueError("익명 사용자와 게시 요청 작성자가 달라 캡처를 중단했습니다.")
                 if (state.get("canIWrite") is not True or state.get("isReadOnly") or wall.get("frozen")
                         or wall.get("is_archived") or wall.get("is_trashed")):
                     raise ValueError("현재 게시판의 쓰기 권한을 확인할 수 없습니다.")

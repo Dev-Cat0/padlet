@@ -18,3 +18,4 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: python tests/browser_smoke.py
       - run: python tests/ui_smoke.py
+      - run: python tests/anonymous_ui_smoke.py

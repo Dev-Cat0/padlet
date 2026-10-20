@@ -43,7 +43,8 @@ async def main():
                                            content_type="text/html", body="Human verification")
             return await route.fulfill(status=201, json={"data": {"id": len(posts)}})
         if path.startswith("/api/11/padlet-starting-state"):
-            return await route.fulfill(json={"wall": {"id": 12, "title": "Fixture", "require_approval": True},
+            return await route.fulfill(json={"wall": {"id": 12, "hashid": "board", "title": "Fixture", "require_approval": True},
+                                             "user": {"id": 31, "hashid": "anon", "registered_at": None},
                                              "canIWrite": True})
         if path == "/api/5/wall_sections":
             return await route.fulfill(json={"data": []})

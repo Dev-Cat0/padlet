@@ -1,56 +1,15 @@
 <!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' https://*.onrender.com http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'">
-  <title>Padlet Sender · Control Panel</title>
-  <link rel="stylesheet" href="./style.css?v=browser-session-1">
-  <script src="./config.js?v=all-sections-1" defer></script>
-  <script src="./app.js?v=browser-session-1" defer></script>
-</head>
-<body>
-  <aside class="rail"><a class="brand" href="./" aria-label="Padlet Sender 홈">p<span>↗</span></a><div class="rail-label">CONTROL PANEL</div><span class="rail-bottom">PS / 01</span></aside>
-  <main>
-    <header><div class="breadcrumb">WORKSPACE <span>/</span> PADLET SENDER</div><span id="connectionBadge" class="badge">● 자동 연결 중</span></header>
-    <section class="intro"><div><p class="eyebrow">YOUR BOARD. YOUR CONTROL.</p><h1>Padlet Sender<span>↗</span></h1><p class="subtitle">브라우저에서 게시한 글의 형식으로, 같은 세션에서 전송하세요.</p></div><span class="version">WEB PANEL <b>02</b></span></section>
-    <div id="notice" class="notice" role="alert" hidden></div>
-    <div class="workspace-grid">
-      <section class="card composer">
-        <div class="section-heading"><h2><span class="number">01</span> 전송 설정</h2><span id="captureBadge" class="small-status">게시판 연결 대기</span></div>
-        <form id="captureForm"><label>대상 게시판<input id="targetUrl" type="url" required placeholder="https://padlet.com/..."></label><button id="openBtn" class="board-btn" disabled type="submit"><span>▣</span> 게시판 브라우저 열기 <span>↗</span></button></form>
-        <div id="boardInfo" class="board-info" hidden><strong id="boardTitle"></strong><span id="boardDetail"></span><span id="sectionNames"></span></div>
-        <div class="divider"></div>
-        <form id="sendForm">
-          <label>제목<input id="subject" maxlength="1000" placeholder="게시물 제목을 입력하세요"></label>
-          <label>본문<textarea id="body" rows="5" maxlength="20000" placeholder="게시할 내용을 입력하세요."></textarea></label>
-          <label id="attachmentLabel" hidden>첨부 링크<input id="attachment" type="url" maxlength="2000" placeholder="https://..."></label>
-          <div id="boardFields"></div>
-          <div class="split"><label>섹션당 반복 횟수<input id="limit" type="number" min="0" max="1000000" step="1" value="50" required><span class="hint">1회 = 모든 섹션에 각 1건 · 0은 무제한</span></label><label>반복 주기 <span class="unit">초</span><input id="delay" type="number" min="0" max="86400" step="any" value="0.3" required><span class="hint">응답이 늦거나 요청 제한 시 지연될 수 있음</span></label></div>
-          <div class="actions"><button id="startBtn" type="submit" class="primary" disabled>▶ 전송 시작</button><button id="stopBtn" type="button" class="stop" disabled>■ 중지</button></div>
-        </form>
-        <p id="actionHint" class="hint">서버에 자동으로 연결하고 있습니다. 잠시만 기다려 주세요.</p>
-      </section>
-      <section class="card monitor">
-        <div class="section-heading"><h2><span class="number">02</span> 실행 현황</h2><span class="micro"><span id="liveDot" class="dot"></span> LIVE</span></div>
-        <div class="stats"><div><span>전송 성공</span><strong id="sentCount">0</strong><small>SUCCESSFUL</small></div><div><span>오류</span><strong id="errorCount">0</strong><small>ERRORS</small></div></div>
-        <div class="progress-label"><span id="phase">시작 대기</span><span id="progressText">—</span></div><progress id="progress" max="100" value="0" aria-label="전송 진행률"></progress>
-        <div class="log-heading"><h3>활동 로그</h3><button id="downloadLog" class="text-btn" type="button">↓ 저장</button></div>
-        <div id="log" class="log" role="log" aria-live="polite"><div class="empty-log"><span>⌁</span><p>아직 실행 기록이 없습니다.</p><small>서버에 연결하면 활동이 여기에 표시됩니다.</small></div></div>
-        <div class="log-footer"><span id="logCount">0 EVENTS</span><span>SESSION ONLY</span></div>
-      </section>
-    </div>
-    <section id="browserPanel" class="card browser-panel" hidden>
-      <div class="section-heading"><h2><span class="number">03</span> 게시 요청 캡처</h2><span id="frameStatus" class="small-status">화면 연결 중</span></div>
-      <p class="hint">아래 화면에서 필요한 보안 확인을 직접 마친 뒤 글을 1건 게시하세요. 성공한 글의 입력값을 전송 설정으로 가져옵니다. 이 글은 실제 게시물로 남으며 반복 횟수에는 포함되지 않습니다.</p>
-      <div class="browser-toolbar"><select id="browserTabs" aria-label="브라우저 탭"></select><button id="browserReload" type="button" class="text-btn">새로고침</button><button data-browser-key="Tab" type="button" class="text-btn">Tab</button><button data-browser-key="Enter" type="button" class="text-btn">Enter</button><button data-browser-key="Backspace" type="button" class="text-btn">지우기</button><button data-browser-key="Escape" type="button" class="text-btn">Esc</button><button data-browser-key="Control+a" type="button" class="text-btn">전체 선택</button></div>
-      <div class="browser-viewport"><img id="browserFrame" width="1100" height="720" alt="원격 Padlet 브라우저. 화면의 입력란을 클릭하고 아래 텍스트 입력을 사용하세요." tabindex="0" draggable="false"></div>
-      <form id="browserTextForm" class="browser-text"><label>선택한 입력란에 넣을 텍스트<input id="browserText" type="password" autocomplete="off" maxlength="20000" placeholder="화면의 입력란을 먼저 클릭하세요"></label><button type="submit" class="board-btn">입력</button></form>
-      <p class="hint">화면을 클릭해 조작하고 스크롤하세요. 한글·비밀번호는 위 입력란으로 전달합니다. 캡처가 끝나면 화면은 닫히고 브라우저 세션은 전송에 유지됩니다. 보안 확인이 계속되면 전송할 수 없습니다.</p>
-    </section>
-    <footer><span><i class="dot"></i> PADLET SENDER <span class="muted">/ WEB EDITION</span></span><button id="clearSession" class="text-btn" disabled>브라우저 세션 종료</button></footer>
-  </main>
-</body>
-</html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<title>Padlet 익명 전송</title><link rel="stylesheet" href="./style.css?v=anonymous-local-1"><script src="./app.js?v=anonymous-local-1" defer></script></head>
+<body><main><header><a href="./" class="brand">p↗</a><span>PADLET SENDER · ANONYMOUS ONLY</span></header>
+<section class="intro"><p class="eyebrow">내 브라우저에서, 계정 로그인 없이</p><h1>가상 브라우저 없이.<br>익명으로 바로 전송.</h1><p>평소 쓰는 브라우저의 Padlet 화면에서 작동합니다.<br>화면을 원격으로 불러오거나 전송 서버에 연결하지 않습니다.</p></section>
+<section class="card"><span class="step">01 · 최초 한 번</span><h2>실행 버튼을 즐겨찾기에 추가하세요</h2><p>아래 버튼을 브라우저의 <strong>즐겨찾기 바에 드래그</strong>하세요.<br>즐겨찾기 바가 없다면 <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>B</kbd>로 표시할 수 있습니다.</p>
+<a id="bookmark" class="primary" draggable="true" aria-disabled="true">익명 Padlet 전송 ↗</a>
+<p id="notice" role="status">실행 버튼을 준비하고 있습니다…</p>
+<details><summary>드래그가 어렵거나 모바일을 사용하나요?</summary><p>새 즐겨찾기를 만든 뒤 주소를 아래 코드로 바꾸세요. 주소창에 붙여넣어 실행하는 방식이 아닙니다.</p><button id="copy" type="button" disabled>즐겨찾기 코드 복사</button><textarea id="code" rows="3" readonly aria-label="즐겨찾기 주소"></textarea><p>모바일 브라우저나 사이트의 보안 설정에 따라 실행이 제한될 수 있습니다.</p></details></section>
+<div class="steps"><section class="card"><span class="step">02 · 로그인하지 않기</span><h2>시크릿 창에서 게시판 열기</h2><p><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd>으로 시크릿 창을 열고 대상 Padlet 주소로 이동하세요. <strong>Padlet에 로그인하지 마세요.</strong></p><p>즐겨찾기에 추가한 <b>익명 Padlet 전송</b>을 누릅니다. 익명 상태를 확인하지 못하면 전송을 차단합니다.</p></section>
+<section class="card"><span class="step">03 · 성공한 글로 준비</span><h2>익명으로 1건 게시한 뒤 전송</h2><p>익명 확인이 완료되면 Padlet 화면에서 글을 1건 직접 게시하세요. 성공한 요청을 캡처하면 제목·본문·횟수·주기를 설정하고 전송할 수 있습니다.</p><p>첫 글은 실제로 게시되며 반복 횟수에는 포함되지 않습니다. 첨부·추가 항목은 첫 글의 값을 유지합니다.</p></section></div>
+<section class="notes"><h2>사용 중에는 Padlet 탭을 열어 두세요</h2><p>매 전송 직전에 익명 상태를 다시 확인합니다. 로그인이나 작성자 변경, 403·보안 확인이 감지되면 중지합니다. 요청 제한이 있으면 기다립니다.</p><p>익명은 Padlet 계정에 로그인하지 않은 상태를 뜻합니다. IP 주소를 숨기는 기능은 아닙니다. 익명 글쓰기를 허용한 게시판에서만 사용할 수 있습니다.</p><p>이 페이지는 실행 버튼만 제공합니다. 게시 내용과 세션 정보를 전송 서버로 보내지 않습니다.</p></section>
+<footer>PADLET SENDER <span>LOCAL BROWSER · NO ACCOUNT LOGIN</span></footer></main></body></html>
