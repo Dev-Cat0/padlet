@@ -23,8 +23,9 @@ function render(next) {
   $('sent').textContent=next.sent;
   $('errors').textContent=next.errors;
   $('phase').textContent=phases[next.phase]||next.phase;
-  $('progress').value=next.limit>0?Math.min(100,next.sent/next.limit*100):0;
-  $('board').textContent=next.board ? next.board.title+(next.board.destination?' · '+next.board.destination:''):'';
+  const total=next.limit*(next.target_count||1);
+  $('progress').value=total>0?Math.min(100,next.sent/total*100):0;
+  $('board').textContent=next.board ? next.board.title+(next.board.sections?.length?' · 전체 '+next.board.sections.length+'개 섹션':'')+(total>0?' · 총 '+total+'건 예정':''):'';
   const logs=next.logs||[];
   if(logs.length&&logs.at(-1).id<lastLog){lastLog=0;$('log').replaceChildren();}
   for(const row of logs.filter(row=>row.id>lastLog)) {

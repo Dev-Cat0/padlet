@@ -67,14 +67,14 @@ def test_limited_section_retries_without_reposting_successes():
     asyncio.run(scenario())
 
 
-def test_stop_waits_for_inflight_and_skips_queued_sections():
+def test_stop_waits_for_all_inflight_sections_and_skips_next_round():
     async def scenario():
         sender = sender_for(12)
         entered, release = asyncio.Event(), asyncio.Event()
         calls = []
         async def post(url, **kwargs):
             calls.append(kwargs['json']['wall_section_id'])
-            if len(calls) == 8:
+            if len(calls) == 12:
                 entered.set()
             await release.wait()
             return reply()
@@ -84,8 +84,8 @@ def test_stop_waits_for_inflight_and_skips_queued_sections():
         sender.stop()
         release.set()
         await sender.worker
-        assert len(calls) == 8 and sender.sent == 8
-        assert sender.rounds == 0 and sender.phase == 'stopped'
+        assert len(calls) == 12 and sender.sent == 12
+        assert sender.rounds == 1 and sender.phase == 'stopped'
     asyncio.run(scenario())
 
 

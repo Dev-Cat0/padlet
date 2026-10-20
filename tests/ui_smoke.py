@@ -45,6 +45,13 @@ def main():
         page.wait_for_function("() => !document.getElementById('start').disabled")
         assert "중지" in page.locator("#phase").inner_text()
         assert page.locator("#subject").input_value()=="Test title"
+        page.evaluate("""() => render({ready:false,running:false,opening:false,phase:'finished',
+            board:{title:'Fixture',sections:[{id:1},{id:2},{id:3}]},target_count:3,
+            sent:3,errors:0,limit:3,rounds:1,logs:[]})""")
+        assert abs(page.locator("#progress").evaluate("(el) => el.value") - 100 / 3) < .01
+        assert "전체 3개 섹션" in page.locator("#board").inner_text()
+        assert "총 9건 예정" in page.locator("#board").inner_text()
+        assert "섹션당 게시물 개수" in page.locator("label", has=page.locator("#limit")).inner_text()
         if (ROOT/".local").is_dir():page.screenshot(path=str(ROOT/".local/simple-panel.png"),full_page=True)
         page.set_viewport_size({"width":390,"height":844})
         assert page.evaluate("document.documentElement.scrollWidth")<=390

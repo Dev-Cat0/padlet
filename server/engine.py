@@ -125,23 +125,16 @@ class Sender:
                 fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
                 subject, body, extra = validate_fields(fields, subject, body, "", {})
                 template.update(extra)
-                # The requested count is a total, not multiplied by section count.
-                section = next((s for s in sections if s["id"] == template.get("wall_section_id")), None)
-                section = section or (sections[0] if sections else None)
-                if section:
-                    template["wall_section_id"] = section["id"]
-                    if section.get("hashid"):
-                        template["wall_section_hashid"] = section["hashid"]
                 self.http, self.endpoint, self.template = transport, endpoint, template
                 self.board = {"url": board_url, "title": str(state["wall"].get("title") or "게시판"),
-                    "approval_required": not template["published"], "sections": [],
-                    "destination": section["title"] if section else "", "fields": fields}
+                    "approval_required": not template["published"], "sections": sections, "fields": fields}
+                self.target_count = len(sections) or 1
             if self.stop_event.is_set():
                 self.phase = "stopped"
                 return
             self.opening = False
             self.running, self.ready = True, True
-            self.log(f"익명 준비 완료 · 총 {'무제한' if limit == 0 else str(limit) + '건'} · 간격 {delay}초", "success")
+            self.log(f"익명 준비 완료 · 대상 {self.target_count}곳 · 섹션당 {'무제한' if limit == 0 else str(limit) + '건'} · {delay}초마다 전체 섹션 동시 전송", "success")
             await self.run(subject, body, limit, delay)
         except asyncio.CancelledError:
             self.phase = "stopped"
@@ -332,7 +325,7 @@ class Sender:
     async def run(self, subject, body, limit, delay):
         # Each round covers every discovered section exactly once. Rounds never overlap.
         targets = copy.deepcopy((self.board or {}).get("sections", [])) or [None]
-        semaphore = asyncio.Semaphore(8)
+        semaphore = asyncio.Semaphore(len(targets))
         next_round = time.monotonic() + delay
         try:
             if self.http is None:

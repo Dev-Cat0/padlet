@@ -42,24 +42,56 @@ def setup(monkeypatch, state=None, fields=None, hold=None):
     return http, browsers
 
 
-def test_one_click_prepares_anonymous_and_sends_exact_total(monkeypatch):
+def test_one_click_prepares_anonymous_and_sends_every_section_each_round(monkeypatch):
     async def scenario():
         http, browsers = setup(monkeypatch)
         sender = Sender()
         await sender.queue_run(URL, "Title", "Body", 3, 0)
         await sender.worker
-        assert sender.sent == 3 and sender.phase == "finished"
-        assert http.post.await_count == 3  # No warm-up/sample POST, no section multiplier.
+        assert sender.sent == 6 and sender.rounds == 3 and sender.phase == "finished"
+        assert sender.target_count == 2
+        assert http.post.await_count == 6  # Three rounds across both sections, no sample POST.
+        assert [call.kwargs["json"]["wall_section_id"] for call in http.post.call_args_list] == [1, 2] * 3
         for call in http.post.call_args_list:
             assert call.kwargs["json"]["author_id"] == 10
-            assert call.kwargs["json"]["wall_section_id"] == 1
+            assert call.kwargs["json"]["wall_section_hashid"] == "sec" + str(call.kwargs["json"]["wall_section_id"])
             assert call.kwargs["json"]["subject"] == "Title"
         assert not browsers[0].capture_enabled and browsers[0].closed
         assert sender.browser is None and sender.http is None and not sender.opening
-        assert sender.board["destination"] == "First"
+        assert len(sender.board["sections"]) == 2
         await sender.queue_run(URL, "Next", "Body", 1, 0)
         await sender.worker
         assert len(browsers) == 2 and browsers[0] is not browsers[1]
+    asyncio.run(scenario())
+
+
+def test_automatic_starts_all_sections_together_every_point_three_seconds(monkeypatch):
+    async def scenario():
+        http, _ = setup(monkeypatch)
+        sections = [{"id": i, "hashid": f"s{i}", "title": str(i)} for i in range(12)]
+        monkeypatch.setattr("server.engine.read_sections", AsyncMock(return_value=sections))
+        now, calls, gates = [0.0], [], [asyncio.Event() for _ in range(3)]
+        monkeypatch.setattr("server.engine.time", SimpleNamespace(monotonic=lambda: now[0]))
+        sender = Sender()
+        async def wait(seconds):
+            now[0] += seconds
+            return False
+        async def post(url, **kwargs):
+            round_index = len(calls) // len(sections)
+            calls.append((now[0], kwargs["json"]["wall_section_id"]))
+            if len(calls) % len(sections) == 0:
+                now[0] += .1  # Response time is part of the interval.
+                gates[round_index].set()
+            await asyncio.wait_for(gates[round_index].wait(), 1)
+            return BrowserResponse({"status": 201, "headers": {}, "text": '{"data":{"id":1}}'})
+        sender.wait, http.post = wait, post
+        await sender.queue_run(URL, "Title", "Body", 3, .3)
+        await sender.worker
+        assert sender.phase == "finished" and sender.sent == 36
+        for i, expected in enumerate([.3, .6, .9]):
+            batch = calls[i * 12:(i + 1) * 12]
+            assert [timestamp for timestamp, _ in batch] == pytest.approx([expected] * 12)
+            assert {section for _, section in batch} == set(range(12))
     asyncio.run(scenario())
 
 

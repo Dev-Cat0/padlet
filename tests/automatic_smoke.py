@@ -44,15 +44,17 @@ async def main():
         try:
             await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 2, 0)
             await sender.worker
-            assert sender.phase == "finished" and sender.sent == 2 and len(posts) == 2
-            assert all(p["author_id"] == 31 and p["wall_section_id"] == 2 for p in posts)
+            assert sender.phase == "finished" and sender.sent == 6 and len(posts) == 6
+            assert all(p["author_id"] == 31 for p in posts)
+            assert sorted(p["wall_section_id"] for p in posts[:3]) == [1, 2, 3]
+            assert sorted(p["wall_section_id"] for p in posts[3:]) == [1, 2, 3]
             assert sender.browser is None and sender.http is None
             challenge = True
             await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 4, 0)
             await sender.worker
-            assert sender.phase == "error" and sender.sent == 0 and len(posts) == 3
+            assert sender.phase == "error" and sender.sent == 0 and 7 <= len(posts) <= 9
             assert sender.browser is None
-            print(json.dumps({"automatic_preparation":True,"exact_total":True,
+            print(json.dumps({"automatic_preparation":True,"all_sections_each_round":True,
                 "manual_steps":0,"challenge_stops":True,"real_posts":0}))
         finally:
             await sender.shutdown()
