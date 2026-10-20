@@ -29,6 +29,13 @@ class Sessions:
                 raise HTTPException(429, "다른 세션이 브라우저를 사용 중입니다. 종료 후 다시 시도하세요.")
             await sender.open(url)
 
+    async def run(self, sender, data):
+        async with self.browser_lock:
+            if any(s.sender is not sender and (s.sender.browser or s.sender.opening)
+                   for s in self.items.values()):
+                raise HTTPException(429, "서버가 다른 작업을 처리 중입니다. 잠시 후 실행하세요.")
+            await sender.queue_run(data.url, data.subject, data.body, data.limit, data.delay)
+
     def create(self):
         now = time.monotonic()
         while self.created and now - self.created[0] > 60:

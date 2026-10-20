@@ -111,6 +111,7 @@ class BrowserSession:
         self.busy = self.closed = False
         self.controls = asyncio.Lock()
         self.dns = {}
+        self.capture_enabled = True
 
     async def public_url(self, value):
         try:
@@ -131,6 +132,8 @@ class BrowserSession:
             return False
 
     async def route(self, route):
+        if not self.capture_enabled and route.request.resource_type in {"image", "media", "font"}:
+            return await route.abort()
         if await self.public_url(route.request.url):
             await route.continue_()
         else:
@@ -153,7 +156,9 @@ class BrowserSession:
         self.context.on("page", self.select_page)
         self.context.on("response", self.observe)
         self.page = await self.context.new_page()
-        await self.page.goto(padlet_url(url), wait_until="domcontentloaded", timeout=40000)
+        response = await self.page.goto(padlet_url(url), wait_until="domcontentloaded", timeout=40000)
+        if response and (response.status in {401, 403} or response.headers.get("cf-mitigated") == "challenge"):
+            raise ValueError("Padlet이 익명 봇의 접속을 거부하거나 보안 확인을 요구합니다. 자동 전송을 중단했습니다.")
 
     def select_page(self, page):
         self.page = page
@@ -169,7 +174,7 @@ class BrowserSession:
         raise ValueError("열린 브라우저가 없습니다. 게시판을 다시 여세요.")
 
     def observe(self, response):
-        if (self.closed or self.busy or self.sender.ready or self.sender.running
+        if (not self.capture_enabled or self.closed or self.busy or self.sender.ready or self.sender.running
                 or response.request.method != "POST" or not capture_url(response.url)):
             return
         task = asyncio.create_task(self.capture(response))

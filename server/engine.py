@@ -56,6 +56,7 @@ class Sender:
         self.sequence = 0
         self.worker = self.http = None
         self.browser = None
+        self.automatic = False
         self.captured_body = None
         self.endpoint = ""
         self.headers, self.template, self.board = {}, {}, None
@@ -87,6 +88,76 @@ class Sender:
         if self.http:
             await self.http.close()
             self.http = None
+
+    async def queue_run(self, url, subject, body, limit, delay):
+        """Accept one job promptly; all preparation happens in a fresh bot context."""
+        url = padlet_url(url)
+        async with self.lock:
+            if self.running or self.opening or self.worker and not self.worker.done():
+                raise ValueError("이미 진행 중인 작업이 있습니다.")
+            self.stop_event.clear()
+            self.sent = self.errors = self.rounds = 0
+            self.limit, self.target_count = limit, 1
+            self.automatic, self.opening, self.phase = True, True, "preparing"
+            self.ready = False
+            self.log("작업 접수 · 봇 전용 익명 세션을 준비합니다.")
+            self.worker = asyncio.create_task(self.automatic_run(url, subject, body, limit, delay))
+        await asyncio.sleep(0)  # Enter the task's cleanup scope before it can be stopped.
+
+    async def automatic_run(self, url, subject, body, limit, delay):
+        try:
+            await self.clear_connection()
+            self.browser = BrowserSession(self)
+            self.browser.capture_enabled = False
+            async with asyncio.timeout(75):
+                await self.browser.open(url)
+                page = self.browser.active_page()
+                board_url = padlet_url(page.url)
+                endpoint = "https://" + urlsplit(board_url).hostname + "/api/9/wishes"
+                transport = BrowserHTTP(page, endpoint)
+                response = await transport.get(transport.origin + "/api/11/padlet-starting-state" + urlsplit(board_url).path)
+                check_response(response, "익명 상태 조회")
+                state = response.json()
+                if (state.get("user") or {}).get("registered_at", "unknown") is not None:
+                    raise ValueError("봇의 익명 상태를 확인할 수 없어 중단했습니다.")
+                template = build_template(state)
+                sections = await read_sections(transport, transport.origin, {}, template["wall_id"])
+                fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
+                subject, body, extra = validate_fields(fields, subject, body, "", {})
+                template.update(extra)
+                # The requested count is a total, not multiplied by section count.
+                section = next((s for s in sections if s["id"] == template.get("wall_section_id")), None)
+                section = section or (sections[0] if sections else None)
+                if section:
+                    template["wall_section_id"] = section["id"]
+                    if section.get("hashid"):
+                        template["wall_section_hashid"] = section["hashid"]
+                self.http, self.endpoint, self.template = transport, endpoint, template
+                self.board = {"url": board_url, "title": str(state["wall"].get("title") or "게시판"),
+                    "approval_required": not template["published"], "sections": [],
+                    "destination": section["title"] if section else "", "fields": fields}
+            if self.stop_event.is_set():
+                self.phase = "stopped"
+                return
+            self.opening = False
+            self.running, self.ready = True, True
+            self.log(f"익명 준비 완료 · 총 {'무제한' if limit == 0 else str(limit) + '건'} · 간격 {delay}초", "success")
+            await self.run(subject, body, limit, delay)
+        except asyncio.CancelledError:
+            self.phase = "stopped"
+            self.log("준비를 중지했습니다. 게시 요청을 보내지 않았습니다.")
+        except Exception as error:
+            self.phase = "error"
+            self.errors += 1
+            message = str(error) if isinstance(error, ValueError) else "익명 세션 준비에 실패했습니다. 잠시 후 다시 실행하세요."
+            self.log(message, "error")
+        finally:
+            # Each run gets a new anonymous context. No user cookies are accepted.
+            board = self.board
+            await self.clear_connection()
+            self.board = board
+            self.opening = self.running = self.automatic = False
+            self.last_activity = time.monotonic()
 
     async def open(self, url):
         url = padlet_url(url)
@@ -307,7 +378,11 @@ class Sender:
             self.last_activity = time.monotonic()
 
     def stop(self):
+        first_stop = not self.stop_event.is_set()
         self.stop_event.set()
+        if first_stop and self.automatic and self.opening and self.worker and not self.worker.done():
+            self.worker.cancel()
+            self.phase = "stopping"
         if self.running:
             self.phase = "stopping"
 
