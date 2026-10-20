@@ -14,6 +14,8 @@ from server.engine import Sender
 async def main():
     posts = []
     challenge = False
+    overlap = False
+    all_started = asyncio.Event()
 
     async def route(self, route):
         path = urlsplit(route.request.url).path
@@ -34,6 +36,10 @@ async def main():
         if path == "/api/9/wishes":
             posts.append(route.request.post_data_json)
             assert "guest=fixture" in (await route.request.all_headers()).get("cookie","")
+            if overlap:
+                if len(posts) == 18:
+                    all_started.set()
+                await asyncio.wait_for(all_started.wait(), 3)
             if challenge:
                 return await route.fulfill(status=403, headers={"cf-mitigated":"challenge"},body="Verify")
             return await route.fulfill(status=201,json={"data":{"id":len(posts)}})
@@ -49,13 +55,19 @@ async def main():
             assert sorted(p["wall_section_id"] for p in posts[:3]) == [1, 2, 3]
             assert sorted(p["wall_section_id"] for p in posts[3:]) == [1, 2, 3]
             assert sender.browser is None and sender.http is None
+            overlap = True
+            await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 4, .00001)
+            await sender.worker
+            assert all_started.is_set() and sender.sent == 12 and sender.phase == "finished"
+            assert all(sum(p["wall_section_id"] == i for p in posts[6:]) == 4 for i in [1, 2, 3])
+            overlap = False
             challenge = True
             await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 4, 0)
             await sender.worker
-            assert sender.phase == "error" and sender.sent == 0 and 7 <= len(posts) <= 9
+            assert sender.phase == "error" and sender.sent == 0 and 19 <= len(posts) <= 30
             assert sender.browser is None
             print(json.dumps({"automatic_preparation":True,"all_sections_each_round":True,
-                "manual_steps":0,"challenge_stops":True,"real_posts":0}))
+                "overlapping_rounds":True,"manual_steps":0,"challenge_stops":True,"real_posts":0}))
         finally:
             await sender.shutdown()
 

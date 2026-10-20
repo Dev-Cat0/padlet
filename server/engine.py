@@ -323,13 +323,16 @@ class Sender:
             return "error", 0
 
     async def run(self, subject, body, limit, delay):
-        # Each round covers every discovered section exactly once. Rounds never overlap.
+        # Each round covers every discovered section exactly once.
         targets = copy.deepcopy((self.board or {}).get("sections", [])) or [None]
         semaphore = asyncio.Semaphore(len(targets))
         next_round = time.monotonic() + delay
         try:
             if self.http is None:
                 raise ValueError("익명 세션이 없습니다.")
+            if delay < .05:
+                await self.run_pipelined(targets, subject, body, limit, delay)
+                return
             while not self.stop_event.is_set() and (limit == 0 or self.rounds < limit):
                 if await self.wait(max(0, next_round - time.monotonic())):
                     break
@@ -369,6 +372,88 @@ class Sender:
         finally:
             self.running = False
             self.last_activity = time.monotonic()
+
+    async def run_pipelined(self, targets, subject, body, limit, delay):
+        """Overlap short-interval rounds without building an unbounded request queue."""
+        capacity = max(1, min(4, 32 // len(targets)))
+        semaphore = asyncio.Semaphore(capacity * len(targets))
+        paused = asyncio.Event()
+        active, retries = {}, deque()
+        launched, backoff, retry_after, fatal = 0, 0, 0, False
+        next_start = time.monotonic() + delay
+        self.log(f"고속 전송 · 최대 {capacity}회차 동시 처리 · 요청 간 추가 대기 없음")
+
+        def collect(future):
+            nonlocal fatal, retry_after
+            batch = active.pop(future)
+            results = future.result()
+            fatal |= any(result == "error" for result, _ in results)
+            retry_after = max(retry_after, max(wait for _, wait in results))
+            pending = [section for section, (result, _) in zip(batch, results) if result != "ok"]
+            if pending:
+                retries.append(pending)
+            else:
+                self.rounds += 1
+
+        async def drain():
+            if active:
+                await asyncio.gather(*active)
+                for future in list(active):
+                    collect(future)
+
+        try:
+            while True:
+                for future in list(active):
+                    if future.done():
+                        collect(future)
+                if fatal or self.stop_event.is_set() or paused.is_set():
+                    # Let requests already sent settle before counting, retrying, or closing.
+                    await drain()
+                    if fatal or self.stop_event.is_set():
+                        break
+                    backoff = max(min(backoff + 3, 30), retry_after)
+                    retry_after = 0
+                    self.phase = "backoff"
+                    self.log(f"429 요청 제한 · {backoff:g}초 대기 · 미완료 요청만 재시도", "warning")
+                    if await self.wait(backoff):
+                        break
+                    paused.clear()
+                    next_start = time.monotonic()
+                    continue
+                more = bool(retries) or limit == 0 or launched < limit
+                if more and len(active) < capacity:
+                    if await self.wait(max(0, next_start - time.monotonic())):
+                        continue
+                    if paused.is_set():
+                        continue
+                    if retries:
+                        batch = retries.popleft()
+                    else:
+                        batch = targets
+                        launched += 1
+                    self.phase = "sending"
+                    future = asyncio.gather(*(self.send_section(section, subject, body, semaphore, paused)
+                                              for section in batch))
+                    active[future] = batch
+                    next_start = time.monotonic() + delay
+                    # Yield even at delay=0 so responses and Stop can be processed.
+                    await asyncio.sleep(0)
+                elif active:
+                    await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                else:
+                    break
+            if fatal:
+                self.phase = "error"
+            elif self.stop_event.is_set():
+                self.phase = "stopped"
+                self.log("사용자가 전송을 중지했습니다.")
+            else:
+                self.phase = "finished"
+                self.log(f"전송 완료 · {self.rounds}회 반복 / 성공 {self.sent}건 / 오류 {self.errors}건", "success")
+        finally:
+            # An unexpected exception must not leave POST tasks running after session cleanup.
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
 
     def stop(self):
         first_stop = not self.stop_event.is_set()
