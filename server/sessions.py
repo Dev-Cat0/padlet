@@ -20,6 +20,14 @@ class Sessions:
     def __init__(self):
         self.items = {}
         self.created = deque()
+        self.browser_lock = asyncio.Lock()
+
+    async def open(self, sender, url):
+        async with self.browser_lock:
+            if any(s.sender is not sender and (s.sender.browser or s.sender.opening)
+                   for s in self.items.values()):
+                raise HTTPException(429, "다른 세션이 브라우저를 사용 중입니다. 종료 후 다시 시도하세요.")
+            await sender.open(url)
 
     def create(self):
         now = time.monotonic()
@@ -49,7 +57,7 @@ class Sessions:
             if now - session.last_seen > 1800:
                 del self.items[token]
                 await sender.shutdown()
-            elif now - sender.last_activity > 1800 and sender.ready:
+            elif now - sender.last_activity > 1800 and (sender.ready or sender.browser):
                 await sender.reset()
 
     async def cleanup(self):

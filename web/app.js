@@ -5,20 +5,21 @@ let token = "", connected = false, state = null, logs = [], lastLog = 0;
 let generation = 0, pollTimer = null, preparing = false, needsConnect = false;
 let reconnectTimer = null;
 let fieldsSignature = '';
+let frameBusy = false, frameUrl = '', actionBusy = false;
 try { token = sessionStorage.getItem('padlet-session') || ''; } catch (_) { /* Memory-only fallback. */ }
-const phases = {waiting:"시작 대기",opening:"익명 게시판 연결 중",ready:"익명 전송 준비 완료",sending:"전송 중",backoff:"요청 제한 · 대기 중",stopping:"중지 중 · 진행 중인 요청 완료 대기",stopped:"사용자 중지",finished:"전송 완료",error:"오류 확인 필요"};
+const phases = {waiting:"시작 대기",opening:"브라우저 준비 중",capturing:"브라우저에서 1건 게시 후 캡처",ready:"게시 요청 캡처 완료",sending:"전송 중",backoff:"요청 제한 · 대기 중",stopping:"중지 중 · 진행 중인 요청 완료 대기",stopped:"사용자 중지",finished:"전송 완료",error:"오류 확인 필요"};
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
-async function api(path, data) {
+async function api(path, data, blob = false) {
   const res = await fetch(base + path, {method:data === undefined ? 'GET':'POST',
     headers:{Authorization:`Bearer ${token}`, ...(data === undefined ? {}:{'Content-Type':'application/json'})},
-    body:data === undefined ? undefined:JSON.stringify(data), signal:AbortSignal.timeout(path.endsWith('/connect') ? 50000:20000), cache:'no-store'});
+    body:data === undefined ? undefined:JSON.stringify(data), signal:AbortSignal.timeout(path.endsWith('/open') || path.endsWith('/connect') ? 55000:20000), cache:'no-store'});
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
     const error = new Error(typeof detail.detail === 'string' ? detail.detail : `요청 실패 (HTTP ${res.status})`);
     error.status = res.status;
     throw error;
   }
-  return res.json();
+  return blob ? res.blob() : res.json();
 }
 function networkMessage(error) {
   return error.name === 'TimeoutError' || error instanceof TypeError
@@ -27,7 +28,7 @@ function networkMessage(error) {
 }
 function renderBoardFields(board) {
   const fields = board?.fields || {};
-  const signature = JSON.stringify([board?.url, fields]);
+  const signature = JSON.stringify([board?.url, board?.capture_id, fields]);
   if (signature === fieldsSignature) return;
   fieldsSignature = signature;
   const required = fields.required || {};
@@ -38,13 +39,14 @@ function renderBoardFields(board) {
     $(id).closest('label').firstChild.textContent = ({subject:'제목',body:'본문',attachment:'첨부 링크'}[id])
       + ($(id).required ? ' (필수)' : '');
     if (id === 'attachment' || board && !enabled) $(id).value = '';
+    if (board?.draft && enabled) $(id).value = board.draft[id] || '';
   }
   $('boardFields').replaceChildren();
   for (const field of fields.custom || []) {
     if (!field.supported) {
       if (field.required) {
         const hint = document.createElement('p'); hint.className = 'hint';
-        hint.textContent = `필수 항목 ‘${field.name}’은 Padlet에서 직접 입력해야 합니다.`;
+        hint.textContent = `필수 항목 ‘${field.name}’은 브라우저에서 게시한 값을 그대로 사용합니다.`;
         $('boardFields').append(hint);
       }
       continue;
@@ -64,8 +66,18 @@ function renderBoardFields(board) {
       if (field.type === 'number') input.step = 'any';
       input.maxLength = 20000;
     }
+    const captured = board?.draft?.custom_properties?.[field.id];
+    if (captured !== undefined && captured !== null) {
+      input.value = input.type === 'date' ? String(captured).slice(0, 10)
+        : input.type === 'datetime-local' ? localDateTime(captured) : String(captured);
+    }
     label.append(input); $('boardFields').append(label);
   }
+}
+function localDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0,16);
 }
 function customProperties() {
   return Object.fromEntries([...$('boardFields').querySelectorAll('[data-property-id]')].map(input => {
@@ -80,11 +92,11 @@ function render(next) {
   $('sentCount').textContent = next.sent.toLocaleString();
   $('errorCount').textContent = next.errors.toLocaleString();
   $('phase').textContent = phases[next.phase] || next.phase;
-  $('captureBadge').textContent = next.ready ? '● 익명 연결됨':'게시판 연결 대기';
+  $('captureBadge').textContent = next.ready ? '● 성공 요청 캡처됨':'성공 요청 캡처 대기';
   $('captureBadge').classList.toggle('ready', next.ready);
   $('liveDot').classList.toggle('live', next.running);
   $('openBtn').disabled = !connected || next.running || next.opening || preparing;
-  $('openBtn').textContent = next.opening || preparing ? '게시판 연결 중…':'익명 게시판 연결 ↗';
+  $('openBtn').textContent = next.opening || preparing ? '브라우저 준비 중…':'게시판 브라우저 열기 ↗';
   $('startBtn').disabled = !connected || !next.ready || next.running || next.opening || preparing || needsConnect;
   $('stopBtn').disabled = !connected || !next.running || next.phase === 'stopping';
   $('clearSession').disabled = !connected || next.opening || preparing;
@@ -98,7 +110,13 @@ function render(next) {
   $('boardDetail').textContent = `${scope}${next.board?.approval_required ? ' · 관리자 승인 필요' : ''}`;
   $('sectionNames').textContent = sections.map(section => section.title).join(' · ');
   if (next.board && !needsConnect && !$('targetUrl').value) $('targetUrl').value = next.board.url;
-  $('actionHint').textContent = next.running ? '중지를 누르면 현재 요청이 끝난 후 멈춥니다.' : needsConnect ? '주소가 변경되었습니다. 게시판에 다시 연결하세요.' : next.ready ? `준비 완료. 매 주기 ${sections.length || 1}건을 게시합니다. 섹션 변경 후에는 다시 연결하세요.` : '게시판 주소를 입력하고 연결하세요. 연결만으로 글이 게시되지는 않습니다.';
+  $('actionHint').textContent = next.running ? '중지를 누르면 현재 요청이 끝난 후 멈춥니다.' : needsConnect ? '주소가 변경되었습니다. 게시판을 다시 여세요.' : next.ready ? `준비 완료. 매 주기 ${sections.length || 1}건을 게시합니다. 섹션 변경 후에는 다시 캡처하세요.` : next.browser ? '아래 브라우저에서 글을 1건 게시하면 성공한 요청을 캡처합니다.' : '게시판 주소를 입력하고 브라우저를 여세요.';
+  $('browserPanel').hidden = !next.browser || next.ready || next.running;
+  for (const control of $('browserPanel').querySelectorAll('button,input,select'))
+    control.disabled = actionBusy || next.opening || next.ready || next.running || preparing;
+  if ($('browserPanel').hidden && frameUrl) {
+    URL.revokeObjectURL(frameUrl); frameUrl = ''; $('browserFrame').removeAttribute('src');
+  }
   if (next.limit > 0) {
     $('progress').value = Math.min((next.rounds || 0) / next.limit * 100, 100);
     $('progressText').textContent = `${next.rounds || 0} / ${next.limit}회 · ${next.sent} / ${next.limit * (next.target_count || 1)}건`;
@@ -130,6 +148,7 @@ async function poll(current) {
     const next = await api('/api/state');
     if (current !== generation) return;
     render(next); $('connectionBadge').textContent = '● 서버 연결됨'; $('connectionBadge').classList.add('connected');
+    refreshFrame(current);
   } catch (error) {
     if (current !== generation) return;
     $('connectionBadge').textContent = '● 연결 재시도 중'; $('connectionBadge').classList.remove('connected');
@@ -174,10 +193,12 @@ $('captureForm').addEventListener('submit', async event => {
   event.preventDefault(); notice(); preparing = true;
   if (state) render(state);
   try {
-    const next = await api('/api/board/connect', {url:$('targetUrl').value.trim()});
+    const next = await api('/api/browser/open', {url:$('targetUrl').value.trim()});
     needsConnect = false;
-    $('targetUrl').value = next.board.url;
+    if (next.board) $('targetUrl').value = next.board.url;
     render(next);
+    refreshFrame(generation);
+    $('browserPanel').scrollIntoView({behavior:'smooth', block:'start'});
   } catch (error) { notice(networkMessage(error)); }
   finally {
     preparing = false;
@@ -207,4 +228,58 @@ $('downloadLog').onclick = () => {
 };
 window.addEventListener('pagehide', () => { generation++; clearTimeout(pollTimer); clearTimeout(reconnectTimer); });
 window.addEventListener('pageshow', event => { if (event.persisted) connect(); });
+async function refreshFrame(current) {
+  if (frameBusy || document.hidden || $('browserPanel').hidden || state?.opening || preparing) return;
+  frameBusy = true;
+  try {
+    const blob = await api('/api/browser/frame', undefined, true);
+    if (current !== generation || $('browserPanel').hidden || preparing) return;
+    const nextUrl = URL.createObjectURL(blob);
+    $('browserFrame').src = nextUrl;
+    if (frameUrl) URL.revokeObjectURL(frameUrl);
+    frameUrl = nextUrl;
+    $('frameStatus').textContent = '● 화면 연결됨';
+    const tabs = await api('/api/browser/tabs');
+    if (current !== generation) return;
+    $('browserTabs').replaceChildren(...tabs.map(tab => new Option(`${tab.index + 1}. ${tab.host}`, tab.index, tab.active, tab.active)));
+  } catch (_) { $('frameStatus').textContent = '화면 다시 불러오는 중'; }
+  finally { frameBusy = false; }
+}
+async function browserAction(action) {
+  if (actionBusy || !connected || !state?.browser || state.ready || state.running || state.opening || preparing) return;
+  actionBusy = true;
+  if (state) render(state);
+  try {
+    render(await api('/api/browser/action', action));
+    await refreshFrame(generation);
+  } catch (error) { notice(networkMessage(error)); }
+  finally { actionBusy = false; if (state) render(state); }
+}
+$('browserFrame').addEventListener('click', event => {
+  if (!frameUrl) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  browserAction({kind:'click', x:Math.max(0, Math.min(1100, (event.clientX - rect.left) * 1100 / rect.width)),
+    y:Math.max(0, Math.min(720, (event.clientY - rect.top) * 720 / rect.height))});
+});
+$('browserFrame').addEventListener('wheel', event => {
+  event.preventDefault();
+  browserAction({kind:'scroll', delta:Math.round(Math.max(-1500, Math.min(1500, event.deltaY)))});
+}, {passive:false});
+$('browserFrame').addEventListener('keydown', event => {
+  const keys = ['Enter','Tab','Backspace','Delete','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+  if (keys.includes(event.key) || event.key === ' ') {
+    event.preventDefault();
+    browserAction({kind:'key', key:event.key === ' ' ? 'Space' : event.key === 'Tab' && event.shiftKey ? 'Shift+Tab' : event.key});
+  }
+});
+$('browserTextForm').addEventListener('submit', event => {
+  event.preventDefault();
+  if (actionBusy || !$('browserText').value) return;
+  const value = $('browserText').value; $('browserText').value = '';
+  browserAction({kind:'text', text:value});
+});
+document.querySelectorAll('[data-browser-key]').forEach(button =>
+  button.addEventListener('click', () => browserAction({kind:'key', key:button.dataset.browserKey})));
+$('browserReload').onclick = () => browserAction({kind:'reload'});
+$('browserTabs').onchange = () => browserAction({kind:'tab', index:Number($('browserTabs').value)});
 connect();

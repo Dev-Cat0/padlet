@@ -1,6 +1,7 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager, suppress
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +64,17 @@ class SendRequest(BaseModel):
     custom_properties: dict[str, str | float | int | None] = Field(default_factory=dict, max_length=100)
 
 
+class BrowserAction(BaseModel):
+    kind: Literal["click", "text", "key", "scroll", "tab", "reload"]
+    x: float = Field(default=0, ge=0, le=1100, allow_inf_nan=False)
+    y: float = Field(default=0, ge=0, le=720, allow_inf_nan=False)
+    text: str = Field(default="", max_length=20000)
+    key: Literal["Enter", "Tab", "Shift+Tab", "Backspace", "Delete", "Escape", "Control+a",
+                 "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"] = "Enter"
+    delta: int = Field(default=0, ge=-1500, le=1500)
+    index: int = Field(default=0, ge=0, le=20)
+
+
 @app.get("/")
 @app.get("/healthz")
 async def health():
@@ -75,11 +87,40 @@ async def state(sender: Sender = Depends(authorize)):
 
 
 @app.post("/api/board/connect")
+@app.post("/api/browser/open")
 async def connect_board(data: OpenRequest, sender: Sender = Depends(authorize)):
     try:
-        await sender.connect(data.url)
+        await sessions.open(sender, data.url)
     except ValueError as error:
         raise HTTPException(400, str(error)) from None
+    return sender.status()
+
+
+@app.get("/api/browser/frame")
+async def browser_frame(sender: Sender = Depends(authorize)):
+    if not sender.browser or sender.running or sender.ready:
+        raise HTTPException(409, "브라우저 화면을 사용할 수 없습니다.")
+    try:
+        return Response(await sender.browser.screenshot(), media_type="image/jpeg")
+    except Exception:
+        raise HTTPException(409, "화면을 불러오지 못했습니다. 잠시 후 다시 시도하세요.") from None
+
+
+@app.get("/api/browser/tabs")
+async def browser_tabs(sender: Sender = Depends(authorize)):
+    return sender.browser.tabs() if sender.browser and sender.browser.context else []
+
+
+@app.post("/api/browser/action")
+async def browser_action(data: BrowserAction, sender: Sender = Depends(authorize)):
+    if not sender.browser:
+        raise HTTPException(409, "먼저 브라우저를 여세요.")
+    try:
+        await sender.browser.control(data)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    except Exception:
+        raise HTTPException(409, "조작을 완료하지 못했습니다. 화면을 확인하세요. 자동 재시도하지 않습니다.") from None
     return sender.status()
 
 

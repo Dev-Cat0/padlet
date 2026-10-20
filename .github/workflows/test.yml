@@ -1,7 +1,7 @@
 name: Server checks
 on:
   push:
-    paths: ['server/**', 'tests/**', 'requirements*.txt', '.github/workflows/test.yml']
+    paths: ['server/**', 'web/**', 'tests/**', 'requirements*.txt', 'Dockerfile', '.github/workflows/test.yml']
   pull_request:
 permissions:
   contents: read
@@ -15,3 +15,6 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
+      - run: python -m playwright install --with-deps chromium
+      - run: python tests/browser_smoke.py
+      - run: python tests/ui_smoke.py

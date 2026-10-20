@@ -42,7 +42,7 @@ async def read_fields(session, origin, headers, wall_id):
         raise ValueError("게시판 입력 항목 형식이 변경되었습니다. 다시 연결하세요.") from None
 
 
-def validate_fields(fields, subject, body, attachment, custom):
+def validate_fields(fields, subject, body, attachment, custom, preserved=None):
     fields = fields or {}
     required = fields.get("required", {})
     subject = subject.strip() if fields.get("subject_enabled", True) else ""
@@ -58,11 +58,15 @@ def validate_fields(fields, subject, body, attachment, custom):
     if custom.keys() - definitions.keys():
         raise ValueError("게시판에 없는 추가 항목입니다. 다시 연결하세요.")
     normalized = {}
+    preserved = {str(k): v for k, v in (preserved or {}).items()}
     for key, field in definitions.items():
-        value = custom.get(key)
-        if key not in custom and field["type"] == "single_select":
+        value = custom.get(key, preserved.get(key))
+        if key not in custom and key not in preserved and field["type"] == "single_select":
             value = next((option["id"] for option in field["options"] if option["default"]), None)
         if not field["supported"]:
+            if key not in custom and key in preserved and preserved[key] not in (None, "", []):
+                normalized[key] = preserved[key]
+                continue
             if field["required"]:
                 raise ValueError(f"‘{field['name']}’은 Padlet에서 직접 입력해야 하는 필수 항목입니다.")
             if value is not None:
