@@ -27,6 +27,8 @@ def setup(monkeypatch, state=None, fields=None, hold=None):
                 await hold.wait()
         def active_page(self):
             return SimpleNamespace(url=URL)
+        async def sending_page(self):
+            return self.active_page()
         async def close(self):
             self.closed = True
     http = SimpleNamespace(origin="https://padlet.com", close=AsyncMock(),

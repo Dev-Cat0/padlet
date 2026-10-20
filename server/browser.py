@@ -132,7 +132,7 @@ class BrowserSession:
             return False
 
     async def route(self, route):
-        if not self.capture_enabled and route.request.resource_type in {"image", "media", "font"}:
+        if not self.capture_enabled and route.request.resource_type in {"image", "media", "font", "stylesheet"}:
             return await route.abort()
         if await self.public_url(route.request.url):
             await route.continue_()
@@ -140,7 +140,10 @@ class BrowserSession:
             await route.abort()
 
     async def websocket(self, route):
-        if await self.public_url(route.url):
+        # Automatic sending never needs the board's live feed.
+        if not self.capture_enabled:
+            await route.close()
+        elif await self.public_url(route.url):
             route.connect_to_server()
         else:
             await route.close()
@@ -172,6 +175,46 @@ class BrowserSession:
             self.page = pages[-1]
             return self.page
         raise ValueError("열린 브라우저가 없습니다. 게시판을 다시 여세요.")
+
+    async def sending_page(self):
+        """Keep the anonymous context, but retire the board's rendering/app loop."""
+        if self.capture_enabled:
+            raise ValueError("자동 전송 세션에서만 경량 페이지를 사용할 수 있습니다.")
+        source = self.active_page()
+        source_url = source.url
+        padlet_url(source_url)
+        bootstrap = await source.evaluate("""() => ({
+            csrf: document.querySelector('meta[name="csrf-token"]')?.content || '',
+            uid: window.ww?.uid ? String(window.ww.uid) : ''
+        })""")
+        if source.url != source_url:
+            raise ValueError("준비 중 게시판 주소가 변경되어 중단했습니다.")
+        old_pages = list(self.context.pages)
+        page = await self.context.new_page()
+
+        async def shell(route):
+            # A local document at the same origin: no second visit to the board.
+            await route.fulfill(content_type="text/html", body=(
+                '<!doctype html><html><head><meta charset="utf-8">'
+                '<meta name="csrf-token" content=""></head><body></body></html>'
+            ))
+
+        try:
+            await page.route("**/*", shell, times=1)
+            await page.goto(source_url, wait_until="domcontentloaded", timeout=10000)
+            await page.evaluate("""({csrf, uid}) => {
+                document.querySelector('meta[name="csrf-token"]').content = csrf;
+                window.ww = {uid};
+            }""", bootstrap)
+            if page.url != source_url:
+                raise ValueError("전송 페이지의 주소를 확인할 수 없습니다.")
+            for old in old_pages:
+                await old.close()
+            self.page = page
+            return page
+        except BaseException:
+            await page.close()
+            raise
 
     def observe(self, response):
         if (not self.capture_enabled or self.closed or self.busy or self.sender.ready or self.sender.running

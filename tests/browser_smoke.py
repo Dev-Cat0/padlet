@@ -84,8 +84,8 @@ async def main():
             challenge = True
             await sender.start("Edited", "Rich body", 5, 0, SAMPLE["attachment"], {"answer": "Edited answer"})
             await sender.worker
-            # Up to four requests can already be in flight when the first challenge arrives.
-            assert 3 <= len(posts) <= 6
+            # Any of the five bounded requests may already be in flight at rejection.
+            assert 3 <= len(posts) <= 7
             assert sender.sent == 0 and sender.errors == len(posts) - 2 and not sender.ready
             assert sender.phase == "error"
             assert sender.browser is browser

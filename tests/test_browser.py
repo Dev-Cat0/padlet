@@ -60,6 +60,36 @@ def test_transport_stays_in_captured_page_and_does_not_export_cookies():
     asyncio.run(scenario())
 
 
+def test_automatic_browser_disables_live_feed_but_manual_browser_retains_it():
+    async def scenario():
+        browser = BrowserSession(Sender())
+        browser.public_url = AsyncMock(return_value=True)
+        route = SimpleNamespace(url="wss://padlet.com/live", close=AsyncMock(),
+                                connect_to_server=lambda: None)
+        browser.capture_enabled = False
+        await browser.websocket(route)
+        route.close.assert_awaited_once()
+        browser.public_url.assert_not_awaited()
+        browser.capture_enabled = True
+        await browser.websocket(route)
+        browser.public_url.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("resource_type", ["image", "media", "font", "stylesheet"])
+def test_automatic_browser_skips_display_resources(resource_type):
+    async def scenario():
+        browser = BrowserSession(Sender())
+        browser.capture_enabled = False
+        browser.public_url = AsyncMock(return_value=True)
+        route = SimpleNamespace(request=SimpleNamespace(resource_type=resource_type),
+                                abort=AsyncMock(), continue_=AsyncMock())
+        await browser.route(route)
+        route.abort.assert_awaited_once()
+        browser.public_url.assert_not_awaited()
+    asyncio.run(scenario())
+
+
 def test_capture_preserves_successful_payload_and_retains_browser(monkeypatch):
     async def scenario():
         sender = Sender()

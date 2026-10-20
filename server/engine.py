@@ -16,6 +16,8 @@ from .browser import BrowserSession, BrowserHTTP, created_post
 from .errors import rejection_message
 from .fields import validate_fields, read_fields
 
+MAX_INFLIGHT_REQUESTS = 32
+
 
 class PlainText(HTMLParser):
     def __init__(self, source):
@@ -111,7 +113,8 @@ class Sender:
             self.browser.capture_enabled = False
             async with asyncio.timeout(75):
                 await self.browser.open(url)
-                page = self.browser.active_page()
+                page = await self.browser.sending_page()
+                self.log("경량 전송 준비 · 게시판 화면과 실시간 갱신을 종료했습니다.")
                 board_url = padlet_url(page.url)
                 endpoint = "https://" + urlsplit(board_url).hostname + "/api/9/wishes"
                 transport = BrowserHTTP(page, endpoint)
@@ -325,44 +328,10 @@ class Sender:
     async def run(self, subject, body, limit, delay):
         # Each round covers every discovered section exactly once.
         targets = copy.deepcopy((self.board or {}).get("sections", [])) or [None]
-        semaphore = asyncio.Semaphore(len(targets))
-        next_round = time.monotonic() + delay
         try:
             if self.http is None:
                 raise ValueError("익명 세션이 없습니다.")
-            if delay < .05:
-                await self.run_pipelined(targets, subject, body, limit, delay)
-                return
-            while not self.stop_event.is_set() and (limit == 0 or self.rounds < limit):
-                if await self.wait(max(0, next_round - time.monotonic())):
-                    break
-                started = time.monotonic()
-                pending, backoff = list(targets), 0
-                while pending and not self.stop_event.is_set():
-                    self.phase = "sending"
-                    paused = asyncio.Event()
-                    results = await asyncio.gather(*(self.send_section(section, subject, body, semaphore, paused)
-                                                     for section in pending))
-                    if any(result == "error" for result, _ in results):
-                        self.phase = "error"
-                        return
-                    pending = [section for section, (result, _) in zip(pending, results) if result != "ok"]
-                    if pending and not self.stop_event.is_set():
-                        backoff = max(min(backoff + 3, 30), max(retry for _, retry in results))
-                        self.phase = "backoff"
-                        self.log(f"429 요청 제한 · {backoff:g}초 대기 · 미완료 {len(pending)}곳만 재시도", "warning")
-                        if await self.wait(backoff):
-                            break
-                if not pending:
-                    self.rounds += 1
-                # Response time counts towards the interval; no random extra delay or catch-up bursts.
-                next_round = max(started + delay, time.monotonic())
-            if self.stop_event.is_set():
-                self.phase = "stopped"
-                self.log("사용자가 전송을 중지했습니다.")
-            else:
-                self.phase = "finished"
-                self.log(f"전송 완료 · {self.rounds}회 반복 / 성공 {self.sent}건 / 오류 {self.errors}건", "success")
+            await self.run_pipelined(targets, subject, body, limit, delay)
         except asyncio.CancelledError:
             self.phase = "stopped"
             raise
@@ -374,14 +343,14 @@ class Sender:
             self.last_activity = time.monotonic()
 
     async def run_pipelined(self, targets, subject, body, limit, delay):
-        """Overlap short-interval rounds without building an unbounded request queue."""
-        capacity = max(1, min(4, 32 // len(targets)))
-        semaphore = asyncio.Semaphore(capacity * len(targets))
+        """Overlap scheduled rounds within a fixed request budget."""
+        capacity = max(1, MAX_INFLIGHT_REQUESTS // len(targets))
+        semaphore = asyncio.Semaphore(MAX_INFLIGHT_REQUESTS)
         paused = asyncio.Event()
         active, retries = {}, deque()
         launched, backoff, retry_after, fatal = 0, 0, 0, False
         next_start = time.monotonic() + delay
-        self.log(f"고속 전송 · 최대 {capacity}회차 동시 처리 · 요청 간 추가 대기 없음")
+        self.log(f"병렬 전송 · 최대 {capacity}회차 / {MAX_INFLIGHT_REQUESTS}건 동시 처리 · 회차 간격 {delay:g}초")
 
         def collect(future):
             nonlocal fatal, retry_after
@@ -422,8 +391,20 @@ class Sender:
                     continue
                 more = bool(retries) or limit == 0 or launched < limit
                 if more and len(active) < capacity:
-                    if await self.wait(max(0, next_start - time.monotonic())):
-                        continue
+                    remaining = next_start - time.monotonic()
+                    if remaining > 0:
+                        interval_wait = asyncio.create_task(self.wait(remaining))
+                        try:
+                            # Process completed responses (especially 429/errors) promptly
+                            # even when the configured interval is very long.
+                            await asyncio.wait([interval_wait, *active],
+                                               return_when=asyncio.FIRST_COMPLETED)
+                            if not interval_wait.done() or interval_wait.result():
+                                continue
+                        finally:
+                            if not interval_wait.done():
+                                interval_wait.cancel()
+                            await asyncio.gather(interval_wait, return_exceptions=True)
                     if paused.is_set():
                         continue
                     if retries:

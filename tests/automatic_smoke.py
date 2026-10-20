@@ -16,14 +16,31 @@ async def main():
     challenge = False
     overlap = False
     all_started = asyncio.Event()
+    board_pages = []
+    light_pages = []
 
     async def route(self, route):
         path = urlsplit(route.request.url).path
         if path == "/example/board":
+            board_pages.append(route.request.frame.page)
             return await route.fulfill(content_type="text/html",
                 headers={"Set-Cookie":"guest=fixture; Path=/; HttpOnly; Secure"},
-                body='<meta name="csrf-token" content="fixture"><h1>Anonymous board</h1>')
+                body="""<meta name="csrf-token" content="fixture"><h1>Large board</h1>
+                    <script>
+                    window.ww = {uid: 'fixture-uid'};
+                    for (let i=0; i<20000; i++) {
+                        const post=document.createElement('article');
+                        post.textContent='Existing post '+i;
+                        document.body.append(post);
+                    }
+                    setInterval(() => document.body.dataset.tick=performance.now(), 10);
+                    </script>""")
         if path.startswith("/api/11/padlet-starting-state"):
+            current = route.request.frame.page
+            assert all(page.is_closed() for page in board_pages)
+            assert len(current.context.pages) == 1
+            assert await current.locator("article, script").count() == 0
+            light_pages.append(current)
             return await route.fulfill(json={"canIWrite":True,
                 "wall":{"id":22,"hashid":"board","wish_arrangement":{"default_section_id":2}},
                 "user":{"id":31,"hashid":"guest","registered_at":None}})
@@ -35,7 +52,11 @@ async def main():
             return await route.fulfill(json={"data":[]})
         if path == "/api/9/wishes":
             posts.append(route.request.post_data_json)
-            assert "guest=fixture" in (await route.request.all_headers()).get("cookie","")
+            headers = await route.request.all_headers()
+            assert "guest=fixture" in headers.get("cookie","")
+            assert headers["x-csrf-token"] == "fixture" and headers["x-uid"] == "fixture-uid"
+            assert route.request.frame.page is light_pages[-1]
+            assert board_pages[-1].is_closed()
             if overlap:
                 if len(posts) == 18:
                     all_started.set()
@@ -66,8 +87,11 @@ async def main():
             await sender.worker
             assert sender.phase == "error" and sender.sent == 0 and 19 <= len(posts) <= 30
             assert sender.browser is None
+            assert len(board_pages) == len(light_pages) == 3  # No second board load.
+            assert all(page.is_closed() for page in light_pages)
             print(json.dumps({"automatic_preparation":True,"all_sections_each_round":True,
-                "overlapping_rounds":True,"manual_steps":0,"challenge_stops":True,"real_posts":0}))
+                "overlapping_rounds":True,"large_board_retired":True,"session_preserved":True,
+                "manual_steps":0,"challenge_stops":True,"real_posts":0}))
         finally:
             await sender.shutdown()
 
