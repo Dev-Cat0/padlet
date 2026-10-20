@@ -84,7 +84,10 @@ async def main():
             challenge = True
             await sender.start("Edited", "Rich body", 5, 0, SAMPLE["attachment"], {"answer": "Edited answer"})
             await sender.worker
-            assert len(posts) == 3 and sender.sent == 0 and sender.errors == 1 and not sender.ready
+            # Up to four requests can already be in flight when the first challenge arrives.
+            assert 3 <= len(posts) <= 6
+            assert sender.sent == 0 and sender.errors == len(posts) - 2 and not sender.ready
+            assert sender.phase == "error"
             assert sender.browser is browser
             await sender.reset()
             assert sender.browser is None and browser.closed
