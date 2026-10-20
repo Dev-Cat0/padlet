@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from .engine import Sender
 from .sessions import Sessions
@@ -55,17 +55,12 @@ class OpenRequest(BaseModel):
 
 
 class SendRequest(BaseModel):
-    subject: str = Field(min_length=1, max_length=1000)
+    subject: str = Field(default="", max_length=1000)
     body: str = Field(default="", max_length=20000)
     limit: int = Field(default=50, ge=0, le=1000000)
     delay: float = Field(default=0.3, ge=0, le=86400, allow_inf_nan=False)
-
-    @field_validator("subject")
-    @classmethod
-    def nonempty(cls, value):
-        if not value.strip():
-            raise ValueError("제목을 입력하세요.")
-        return value.strip()
+    attachment: str = Field(default="", max_length=2000)
+    custom_properties: dict[str, str | float | int | None] = Field(default_factory=dict, max_length=100)
 
 
 @app.get("/")
@@ -91,7 +86,8 @@ async def connect_board(data: OpenRequest, sender: Sender = Depends(authorize)):
 @app.post("/api/start")
 async def start(data: SendRequest, sender: Sender = Depends(authorize)):
     try:
-        await sender.start(data.subject, data.body, data.limit, data.delay)
+        await sender.start(data.subject, data.body, data.limit, data.delay,
+                           data.attachment, data.custom_properties)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     return sender.status()

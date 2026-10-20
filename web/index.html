@@ -7,9 +7,9 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self' https://*.onrender.com http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>Padlet Sender · Control Panel</title>
-  <link rel="stylesheet" href="./style.css?v=all-sections-1">
+  <link rel="stylesheet" href="./style.css?v=board-fields-2">
   <script src="./config.js?v=all-sections-1" defer></script>
-  <script src="./app.js?v=all-sections-1" defer></script>
+  <script src="./app.js?v=board-fields-2" defer></script>
 </head>
 <body>
   <aside class="rail"><a class="brand" href="./" aria-label="Padlet Sender 홈">p<span>↗</span></a><div class="rail-label">CONTROL PANEL</div><span class="rail-bottom">PS / 01</span></aside>
@@ -24,8 +24,10 @@
         <div id="boardInfo" class="board-info" hidden><strong id="boardTitle"></strong><span id="boardDetail"></span><span id="sectionNames"></span></div>
         <div class="divider"></div>
         <form id="sendForm">
-          <label>제목<input id="subject" required maxlength="1000" placeholder="게시물 제목을 입력하세요"></label>
+          <label>제목<input id="subject" maxlength="1000" placeholder="게시물 제목을 입력하세요"></label>
           <label>본문<textarea id="body" rows="5" maxlength="20000" placeholder="게시할 내용을 입력하세요."></textarea></label>
+          <label id="attachmentLabel" hidden>첨부 링크<input id="attachment" type="url" maxlength="2000" placeholder="https://..."></label>
+          <div id="boardFields"></div>
           <div class="split"><label>섹션당 반복 횟수<input id="limit" type="number" min="0" max="1000000" step="1" value="50" required><span class="hint">1회 = 모든 섹션에 각 1건 · 0은 무제한</span></label><label>반복 주기 <span class="unit">초</span><input id="delay" type="number" min="0" max="86400" step="any" value="0.3" required><span class="hint">응답이 늦거나 요청 제한 시 지연될 수 있음</span></label></div>
           <div class="actions"><button id="startBtn" type="submit" class="primary" disabled>▶ 전송 시작</button><button id="stopBtn" type="button" class="stop" disabled>■ 중지</button></div>
         </form>

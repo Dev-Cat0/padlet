@@ -45,7 +45,7 @@ def test_state_hides_secrets_and_cors(client):
 def test_start_validates_input_and_capture(client):
     auth = session_auth(client)
     assert client.post('/api/start', headers=auth, json={'subject':'ok'}).status_code == 409
-    for values in [{'subject':' '}, {'subject':'x','delay':-1}, {'subject':'x','limit':-1}, {'subject':'x','limit':1.5}]:
+    for values in [{'subject':'x','delay':-1}, {'subject':'x','limit':-1}, {'subject':'x','limit':1.5}]:
         assert client.post('/api/start', headers=auth, json=values).status_code == 422
 
 

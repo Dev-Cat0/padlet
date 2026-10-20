@@ -116,7 +116,9 @@ async def prepare(session, value):
     except (TypeError, KeyError, AttributeError):
         raise ValueError("게시판 응답 형식이 변경되었습니다. 연결 정보를 확인할 수 없습니다.") from None
     sections = await read_sections(session, origin, headers, template["wall_id"])
+    from .fields import read_fields
+    fields = await read_fields(session, origin, headers, template["wall_id"])
     return origin + "/api/9/wishes", headers, template, {
         "url": url, "title": str(state["wall"].get("title") or "익명 게시판"),
-        "approval_required": not template["published"], "sections": sections,
+        "approval_required": not template["published"], "sections": sections, "fields": fields,
     }

@@ -10,12 +10,14 @@ from datetime import datetime, timezone
 
 from curl_cffi.requests import AsyncSession
 from .anonymous import padlet_url, prepare
+from .errors import rejection_message
+from .fields import validate_fields
 
 
 def make_payload(template: dict, subject: str, body: str) -> dict:
     payload = copy.deepcopy(template)
     payload["subject"] = subject
-    payload["body"] = "<p>" + html.escape(body).replace("\n", "<br>") + "</p>"
+    payload["body"] = "<p>" + html.escape(body).replace("\n", "<br>") + "</p>" if body else ""
     payload["cid"] = "c_new" + secrets.token_hex(12)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     payload.update(created_at=now, updated_at=now)
@@ -81,12 +83,15 @@ class Sender:
             self.opening = False
             self.last_activity = time.monotonic()
 
-    async def start(self, subject, body, limit, delay):
+    async def start(self, subject, body, limit, delay, attachment="", custom_properties=None):
         async with self.lock:
             if not self.ready or self.opening:
                 raise ValueError("먼저 익명 게시판에 연결하세요.")
             if self.running:
                 raise ValueError("이미 전송 중입니다.")
+            subject, body, fields = validate_fields((self.board or {}).get("fields"), subject, body,
+                                                   attachment, custom_properties or {})
+            self.template.update(fields)
             self.stop_event.clear()
             self.sent = self.errors = self.rounds = 0
             self.limit = limit
@@ -139,7 +144,12 @@ class Sender:
                 return "limited", retry
             if status in {401, 403}:
                 self.ready = False
-            self.log(f"{label}: HTTP {status} 오류로 중지했습니다. 권한·섹션 목록을 확인하고 다시 연결하세요.", "error")
+            private_values = [value for key, value in self.headers.items()
+                              if key.lower() in {"x-csrf-token", "authorization", "cookie", "x-uid"}]
+            cookies = getattr(self.http, "cookies", None)
+            if cookies is not None:
+                private_values.extend(cookie.value for cookie in cookies.jar)
+            self.log(f"{label}: {rejection_message(response, private_values)}", "error")
             return "error", 0
 
     async def run(self, subject, body, limit, delay):

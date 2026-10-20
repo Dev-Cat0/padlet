@@ -26,7 +26,9 @@ def client(state=None):
         response(text='<meta content="csrf-secret" name="csrf-token">'),
         response(data=deepcopy(STATE) if state is None else state),
         response(data={'data': [{'attributes': {'id': 33, 'hashid': 'sec_one', 'title': 'First'}},
-                                  {'attributes': {'id': 34, 'hashid': 'sec_two', 'title': 'Second'}}]})]),
+                                  {'attributes': {'id': 34, 'hashid': 'sec_two', 'title': 'Second'}}]}),
+        response(data={'data': {'attributes': {'required_fields': {'body': True}}}}),
+        response(data={'data': []})]),
         post=AsyncMock(), close=AsyncMock())
 
 
@@ -39,10 +41,11 @@ def test_prepare_uses_get_only_and_preserves_guest_identity():
         assert template['author_id'] == 11 and template['wall_section_id'] == 33
         assert template['wall_id'] == 22 and template['published']
         assert board['url'] == URL
-        assert session.get.await_count == 3
+        assert session.get.await_count == 5
         assert session.get.call_args_list[1].args[0] == 'https://padlet.com/api/11/padlet-starting-state/example/test-board'
-        assert session.get.call_args.args[0] == 'https://padlet.com/api/5/wall_sections'
-        assert session.get.call_args.kwargs['params'] == {'wall_id': 22}
+        assert session.get.call_args_list[2].args[0] == 'https://padlet.com/api/5/wall_sections'
+        assert session.get.call_args_list[2].kwargs['params'] == {'wall_id': 22}
+        assert board['fields']['required']['body'] is True
         assert [section['id'] for section in board['sections']] == [33, 34]
         assert all(call.kwargs['allow_redirects'] is False for call in session.get.call_args_list)
         session.post.assert_not_awaited()

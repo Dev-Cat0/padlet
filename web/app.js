@@ -4,6 +4,7 @@ const base = window.PADLET_CONFIG.serverUrl;
 let token = "", connected = false, state = null, logs = [], lastLog = 0;
 let generation = 0, pollTimer = null, preparing = false, needsConnect = false;
 let reconnectTimer = null;
+let fieldsSignature = '';
 try { token = sessionStorage.getItem('padlet-session') || ''; } catch (_) { /* Memory-only fallback. */ }
 const phases = {waiting:"시작 대기",opening:"익명 게시판 연결 중",ready:"익명 전송 준비 완료",sending:"전송 중",backoff:"요청 제한 · 대기 중",stopping:"중지 중 · 진행 중인 요청 완료 대기",stopped:"사용자 중지",finished:"전송 완료",error:"오류 확인 필요"};
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
@@ -24,8 +25,58 @@ function networkMessage(error) {
     ? '서버 연결이 지연되거나 끊겼습니다. 잠시 후 다시 연결해 주세요. 실행 중인 작업은 서버에서 계속될 수 있습니다.'
     : error.message;
 }
+function renderBoardFields(board) {
+  const fields = board?.fields || {};
+  const signature = JSON.stringify([board?.url, fields]);
+  if (signature === fieldsSignature) return;
+  fieldsSignature = signature;
+  const required = fields.required || {};
+  for (const id of ['subject', 'body', 'attachment']) {
+    const enabled = Boolean(board) && fields[`${id}_enabled`] !== false;
+    $(id).closest('label').hidden = id === 'attachment' ? !enabled : Boolean(board) && !enabled;
+    $(id).required = enabled && Boolean(required[id]);
+    $(id).closest('label').firstChild.textContent = ({subject:'제목',body:'본문',attachment:'첨부 링크'}[id])
+      + ($(id).required ? ' (필수)' : '');
+    if (id === 'attachment' || board && !enabled) $(id).value = '';
+  }
+  $('boardFields').replaceChildren();
+  for (const field of fields.custom || []) {
+    if (!field.supported) {
+      if (field.required) {
+        const hint = document.createElement('p'); hint.className = 'hint';
+        hint.textContent = `필수 항목 ‘${field.name}’은 Padlet에서 직접 입력해야 합니다.`;
+        $('boardFields').append(hint);
+      }
+      continue;
+    }
+    const label = document.createElement('label');
+    label.textContent = field.name + (field.required ? ' (필수)' : '');
+    const input = document.createElement(field.type === 'single_select' ? 'select' : 'input');
+    input.dataset.propertyId = field.id;
+    input.dataset.propertyType = field.type;
+    input.required = field.required;
+    if (field.type === 'single_select') {
+      input.add(new Option('선택하세요', ''));
+      for (const option of field.options) input.add(new Option(option.name, option.id, option.default, option.default));
+    } else {
+      input.type = field.type === 'date' && field.show_time ? 'datetime-local'
+        : ({number:'number',date:'date',email:'email',url:'url',phone_number:'tel'}[field.type] || 'text');
+      if (field.type === 'number') input.step = 'any';
+      input.maxLength = 20000;
+    }
+    label.append(input); $('boardFields').append(label);
+  }
+}
+function customProperties() {
+  return Object.fromEntries([...$('boardFields').querySelectorAll('[data-property-id]')].map(input => {
+    const value = input.value.trim();
+    return [input.dataset.propertyId, !value ? null : input.dataset.propertyType === 'number' ? Number(value)
+      : input.type === 'datetime-local' ? new Date(value).toISOString() : value];
+  }));
+}
 function render(next) {
   state = next;
+  renderBoardFields(next.board);
   $('sentCount').textContent = next.sent.toLocaleString();
   $('errorCount').textContent = next.errors.toLocaleString();
   $('phase').textContent = phases[next.phase] || next.phase;
@@ -38,7 +89,8 @@ function render(next) {
   $('stopBtn').disabled = !connected || !next.running || next.phase === 'stopping';
   $('clearSession').disabled = !connected || next.opening || preparing;
   $('targetUrl').disabled = next.running || next.opening || preparing;
-  for (const id of ['subject','body','limit','delay']) $(id).disabled = next.running;
+  for (const id of ['subject','body','attachment','limit','delay']) $(id).disabled = next.running;
+  for (const input of $('boardFields').querySelectorAll('input,select')) input.disabled = next.running;
   $('boardInfo').hidden = !next.board;
   $('boardTitle').textContent = next.board?.title || '';
   const sections = next.board?.sections || [];
@@ -137,7 +189,8 @@ $('sendForm').addEventListener('submit', async event => {
   event.preventDefault();
   if (needsConnect || preparing || !state?.ready || state.running) return;
   notice(); $('startBtn').disabled = true;
-  try { render(await api('/api/start', {subject:$('subject').value,body:$('body').value,limit:Number($('limit').value),delay:Number($('delay').value)})); }
+  try { render(await api('/api/start', {subject:$('subject').value,body:$('body').value,attachment:$('attachment').value,
+    custom_properties:customProperties(),limit:Number($('limit').value),delay:Number($('delay').value)})); }
   catch (error) { notice(networkMessage(error)); if (state) render(state); }
 });
 $('stopBtn').onclick = async () => {
