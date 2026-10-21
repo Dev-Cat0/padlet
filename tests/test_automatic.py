@@ -126,6 +126,30 @@ def test_required_extra_fields_fail_before_post(monkeypatch):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("kind,reason", [("timeout", "시간이 초과"),
+    ("closed", "브라우저가 종료"), ("network", "브라우저 통신"), ("internal", "내부 오류")])
+def test_preparation_failure_reports_stage_without_private_diagnostics(monkeypatch, caplog, kind, reason):
+    from playwright.async_api import Error as BrowserError
+    failures = {"timeout": TimeoutError("private-token"),
+                "closed": BrowserError("Target page closed private-token"),
+                "network": BrowserError("Failed to fetch private-token"),
+                "internal": RuntimeError("private-token")}
+    async def scenario():
+        http, browsers = setup(monkeypatch)
+        http.get.side_effect = failures[kind]
+        sender = Sender()
+        await sender.queue_run(URL, "Title", "Body", 1, 0)
+        await sender.worker
+        assert sender.phase == "error" and sender.errors == 1
+        assert reason in sender.logs[-1]["message"]
+        assert "익명 상태 조회" in sender.logs[-1]["message"]
+        assert "익명 상태 조회" in caplog.text
+        assert "private-token" not in str(sender.status()) + caplog.text
+        assert browsers[0].closed and not sender.opening and sender.browser is None
+        http.post.assert_not_awaited()
+    asyncio.run(scenario())
+
+
 def test_stop_during_preparation_closes_without_post(monkeypatch):
     async def scenario():
         http, browsers = setup(monkeypatch, hold=asyncio.Event())

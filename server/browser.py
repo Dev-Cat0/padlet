@@ -7,7 +7,7 @@ import time
 from contextlib import suppress
 from urllib.parse import urlencode, urlsplit
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as BrowserTimeoutError
 
 from .anonymous import padlet_url
 
@@ -148,7 +148,7 @@ class BrowserSession:
         else:
             await route.close()
 
-    async def open(self, url):
+    async def initialize(self):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
         self.context = await self.browser.new_context(viewport=VIEWPORT, locale="ko-KR",
@@ -158,10 +158,31 @@ class BrowserSession:
         await self.context.route_web_socket("**/*", self.websocket)
         self.context.on("page", self.select_page)
         self.context.on("response", self.observe)
+
+    async def open(self, url):
+        await self.initialize()
         self.page = await self.context.new_page()
-        response = await self.page.goto(padlet_url(url), wait_until="domcontentloaded", timeout=40000)
+        # Deferred app bundles can stall DOMContentLoaded after the inline guest
+        # bootstrap is already ready. Automatic jobs only need that bootstrap.
+        self.sender.log("게시판 접속 · 익명 세션 정보를 확인합니다.")
+        try:
+            response = await self.page.goto(padlet_url(url),
+                wait_until="domcontentloaded" if self.capture_enabled else "commit", timeout=40000)
+        except BrowserTimeoutError:
+            raise ValueError("게시판 접속 시간이 초과되었습니다 (40초). 서버에서 Padlet 페이지를 불러오지 못했습니다.") from None
         if response and (response.status in {401, 403} or response.headers.get("cf-mitigated") == "challenge"):
             raise ValueError("Padlet이 익명 봇의 접속을 거부하거나 보안 확인을 요구합니다. 자동 전송을 중단했습니다.")
+        if response and response.status >= 400:
+            raise ValueError(f"게시판 페이지 조회 실패 (HTTP {response.status}). 게시판 주소와 접근 권한을 확인하세요.")
+        padlet_url(self.page.url)
+        if not self.capture_enabled:
+            try:
+                handle = await self.page.wait_for_function("""() => Boolean(
+                    document.querySelector('meta[name="csrf-token"]')?.content && window.ww?.uid
+                )""", timeout=15000)
+                await handle.dispose()
+            except BrowserTimeoutError:
+                raise ValueError("익명 세션 정보를 확인하지 못했습니다 (15초). 로그인·보안 확인이 필요하거나 페이지 로딩이 지연되고 있습니다.") from None
 
     def select_page(self, page):
         self.page = page

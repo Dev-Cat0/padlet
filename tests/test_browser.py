@@ -76,6 +76,44 @@ def test_automatic_browser_disables_live_feed_but_manual_browser_retains_it():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("status,headers,reason", [
+    (403, {}, "보안 확인"), (200, {"cf-mitigated": "challenge"}, "보안 확인"),
+    (404, {}, "HTTP 404"), (503, {}, "HTTP 503"),
+])
+def test_browser_open_rejects_bad_response_before_waiting_for_bootstrap(status, headers, reason):
+    async def scenario():
+        browser = BrowserSession(Sender())
+        browser.capture_enabled = False
+        browser.initialize = AsyncMock()
+        browser_page = page()
+        browser_page.goto = AsyncMock(return_value=SimpleNamespace(status=status, headers=headers))
+        browser_page.wait_for_function = AsyncMock()
+        browser.context = SimpleNamespace(new_page=AsyncMock(return_value=browser_page))
+        with pytest.raises(ValueError, match=reason):
+            await browser.open(URL)
+        browser_page.wait_for_function.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("step,reason", [("goto", "게시판 접속 시간이 초과"),
+                                         ("wait_for_function", "익명 세션 정보를 확인하지 못")])
+def test_browser_open_reports_navigation_and_bootstrap_timeout_separately(step, reason):
+    from playwright.async_api import TimeoutError as BrowserTimeoutError
+    async def scenario():
+        browser = BrowserSession(Sender())
+        browser.capture_enabled = False
+        browser.initialize = AsyncMock()
+        browser_page = page()
+        browser_page.goto = AsyncMock(return_value=SimpleNamespace(status=200, headers={}))
+        browser_page.wait_for_function = AsyncMock()
+        getattr(browser_page, step).side_effect = BrowserTimeoutError("private diagnostic")
+        browser.context = SimpleNamespace(new_page=AsyncMock(return_value=browser_page))
+        with pytest.raises(ValueError, match=reason) as error:
+            await browser.open(URL)
+        assert "private diagnostic" not in str(error.value)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("resource_type", ["image", "media", "font", "stylesheet"])
 def test_automatic_browser_skips_display_resources(resource_type):
     async def scenario():

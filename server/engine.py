@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import html
+import logging
 import math
 import secrets
 import time
@@ -11,12 +12,14 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 from curl_cffi.requests import AsyncSession
+from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeoutError
 from .anonymous import padlet_url, prepare, check_response, read_sections, build_template
 from .browser import BrowserSession, BrowserHTTP, created_post
 from .errors import rejection_message
 from .fields import validate_fields, read_fields
 
 MAX_INFLIGHT_REQUESTS = 32
+logger = logging.getLogger(__name__)
 
 
 class PlainText(HTMLParser):
@@ -107,24 +110,29 @@ class Sender:
         await asyncio.sleep(0)  # Enter the task's cleanup scope before it can be stopped.
 
     async def automatic_run(self, url, subject, body, limit, delay):
+        stage = "브라우저 시작·게시판 접속"
         try:
             await self.clear_connection()
             self.browser = BrowserSession(self)
             self.browser.capture_enabled = False
             async with asyncio.timeout(75):
                 await self.browser.open(url)
+                stage = "경량 페이지 준비"
                 page = await self.browser.sending_page()
                 self.log("경량 전송 준비 · 게시판 화면과 실시간 갱신을 종료했습니다.")
                 board_url = padlet_url(page.url)
                 endpoint = "https://" + urlsplit(board_url).hostname + "/api/9/wishes"
                 transport = BrowserHTTP(page, endpoint)
+                stage = "익명 상태 조회"
                 response = await transport.get(transport.origin + "/api/11/padlet-starting-state" + urlsplit(board_url).path)
                 check_response(response, "익명 상태 조회")
                 state = response.json()
                 if (state.get("user") or {}).get("registered_at", "unknown") is not None:
                     raise ValueError("봇의 익명 상태를 확인할 수 없어 중단했습니다.")
                 template = build_template(state)
+                stage = "섹션 목록 조회"
                 sections = await read_sections(transport, transport.origin, {}, template["wall_id"])
+                stage = "필수 입력 항목 조회"
                 fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
                 subject, body, extra = validate_fields(fields, subject, body, "", {})
                 template.update(extra)
@@ -145,7 +153,19 @@ class Sender:
         except Exception as error:
             self.phase = "error"
             self.errors += 1
-            message = str(error) if isinstance(error, ValueError) else "익명 세션 준비에 실패했습니다. 잠시 후 다시 실행하세요."
+            # Exception text/tracebacks can contain cookies, tokens, or response
+            # bodies. Record only controlled stage names and exception types.
+            logger.warning("Anonymous preparation failed: stage=%s error_type=%s", stage, type(error).__name__)
+            if isinstance(error, (TimeoutError, BrowserTimeoutError)):
+                message = f"{stage} 중 응답 대기 시간이 초과되었습니다. 서버 연결 상태를 확인한 뒤 다시 실행하세요."
+            elif isinstance(error, BrowserError):
+                reason = ("서버 브라우저가 종료되었습니다" if "closed" in str(error).lower()
+                          or "crash" in str(error).lower() else "서버 브라우저 통신에 실패했습니다")
+                message = f"{stage} 중 {reason}. 서버 실행 상태를 확인하세요."
+            elif isinstance(error, ValueError):
+                message = str(error)
+            else:
+                message = f"{stage} 중 내부 오류가 발생했습니다. 서버 로그를 확인하세요."
             self.log(message, "error")
         finally:
             # Each run gets a new anonymous context. No user cookies are accepted.
