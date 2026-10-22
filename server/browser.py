@@ -1,7 +1,8 @@
-"""Manual browser capture and same-page transport. No exported browser cookies."""
+"""Same-page transport; bot deletion credentials stay in server memory."""
 import asyncio
 import ipaddress
 import json
+import re
 import socket
 import time
 from contextlib import suppress
@@ -34,6 +35,17 @@ def created_post(data):
     return bool(post.get("id") or isinstance(attrs, dict) and attrs.get("id"))
 
 
+def deletion_hashid(data):
+    """Only use the hashid returned by creation, never a board/list supplied ID."""
+    if not created_post(data):
+        return None
+    post = data["data"]
+    attrs = post.get("attributes")
+    value = attrs.get("hashid") if isinstance(attrs, dict) else None
+    value = value or post.get("hashid")
+    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) else None
+
+
 class BrowserResponse:
     def __init__(self, result):
         self.status_code = result["status"]
@@ -60,7 +72,9 @@ class BrowserHTTP:
             raise ValueError("캡처한 브라우저 페이지가 변경되었습니다. 다시 캡처하세요.")
         parsed = urlsplit(url)
         if (f"{parsed.scheme}://{parsed.netloc}" != self.origin or parsed.username
-                or parsed.password or method == "POST" and url != self.endpoint):
+                or parsed.password or method not in {"GET", "POST", "DELETE"}
+                or method == "POST" and url != self.endpoint
+                or method == "DELETE" and not re.fullmatch(re.escape(self.endpoint) + r"/[A-Za-z0-9_-]{1,128}", url)):
             raise ValueError("캡처한 게시판과 다른 주소로 전송할 수 없습니다.")
         result = await self.page.evaluate("""async ({method, url, payload, timeout, pageUrl}) => {
             if (location.href !== pageUrl || new URL(url).origin !== location.origin)
@@ -98,6 +112,9 @@ class BrowserHTTP:
 
     async def post(self, url, **kwargs):
         return await self.request("POST", url, payload=kwargs["json"], timeout=kwargs.get("timeout", 10))
+
+    async def delete(self, url, **kwargs):
+        return await self.request("DELETE", url, timeout=kwargs.get("timeout", 10))
 
     async def close(self):
         pass  # BrowserSession owns the context and closes it on reset/expiry.
@@ -148,11 +165,11 @@ class BrowserSession:
         else:
             await route.close()
 
-    async def initialize(self):
+    async def initialize(self, storage_state=None):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
         self.context = await self.browser.new_context(viewport=VIEWPORT, locale="ko-KR",
-            service_workers="block", accept_downloads=False)
+            service_workers="block", accept_downloads=False, storage_state=storage_state)
         self.context.set_default_timeout(10000)
         await self.context.route("**/*", self.route)
         await self.context.route_web_socket("**/*", self.websocket)
@@ -183,6 +200,35 @@ class BrowserSession:
                 await handle.dispose()
             except BrowserTimeoutError:
                 raise ValueError("익명 세션 정보를 확인하지 못했습니다 (15초). 로그인·보안 확인이 필요하거나 페이지 로딩이 지연되고 있습니다.") from None
+
+    async def snapshot(self):
+        page = self.active_page()
+        url = page.url
+        padlet_url(url)
+        bootstrap = await page.evaluate("""() => ({
+            csrf: document.querySelector('meta[name="csrf-token"]')?.content || '',
+            uid: window.ww?.uid ? String(window.ww.uid) : ''
+        })""")
+        if page.url != url:
+            raise ValueError("삭제 세션의 게시판 주소가 변경되었습니다.")
+        return {"url": url, "bootstrap": bootstrap,
+                "storage": {"cookies": await self.context.cookies(), "origins": []}}
+
+    async def restore(self, snapshot):
+        """Restore our bot's identity in memory without visiting or scraping the board."""
+        self.capture_enabled = False
+        await self.initialize(snapshot["storage"])
+        self.page = await self.context.new_page()
+        async def shell(route):
+            await route.fulfill(content_type="text/html",
+                body='<meta name="csrf-token" content=""><body></body>')
+        await self.page.route("**/*", shell, times=1)
+        await self.page.goto(padlet_url(snapshot["url"]), wait_until="domcontentloaded")
+        await self.page.evaluate("""({csrf, uid}) => {
+            document.querySelector('meta[name="csrf-token"]').content = csrf;
+            window.ww = {uid};
+        }""", snapshot["bootstrap"])
+        return self.page
 
     def select_page(self, page):
         self.page = page
@@ -278,7 +324,7 @@ class BrowserSession:
 
     async def control(self, action):
         async with self.controls:
-            if self.sender.running or self.sender.ready or self.sender.opening or self.busy:
+            if self.sender.deleting or self.sender.running or self.sender.ready or self.sender.opening or self.busy:
                 raise ValueError("전송 준비 중이거나 캡처가 완료되어 브라우저 조작이 잠겨 있습니다.")
             page = self.active_page()
             self.sender.last_activity = time.monotonic()

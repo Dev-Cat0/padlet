@@ -1,16 +1,23 @@
 import asyncio
 import os
+import secrets
+import re
 from contextlib import asynccontextmanager, suppress
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .engine import Sender
 from .sessions import Sessions
+from .key_access import KeyAccess
 
 sessions = Sessions()
+key_access = KeyAccess()
 allowed_origins = [s.strip() for s in os.getenv("ALLOWED_ORIGINS", "https://dev-cat0.github.io").split(",") if s.strip()]
 
 
@@ -22,23 +29,76 @@ async def lifespan(app):
     with suppress(asyncio.CancelledError):
         await cleanup
     await sessions.shutdown()
+    await key_access.close()
 
 
-app = FastAPI(title="Padlet Sender", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="Padlet Sender", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+    allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type", "X-Request-ID"])
 
 
 async def authorize(authorization: str = Header(default="")):
     return sessions.authorize(authorization)
 
 
-@app.post("/api/session")
-async def create_session(origin: str = Header(default="")):
+def check_origin(origin):
     if origin not in allowed_origins:
         raise HTTPException(403, "웹 패널에서 연결하세요.")
-    return {"token": sessions.create()}
+
+
+@app.post("/api/session")
+async def removed_session(origin: str = Header(default="")):
+    check_origin(origin)
+    raise HTTPException(403, "키 인증이 필요합니다.")
+
+
+class LoginRequest(BaseModel):
+    key: str
+
+
+@app.post("/api/auth/login")
+async def login(data: LoginRequest, request: Request, origin: str = Header(default="")):
+    check_origin(origin)
+    client_id = key_access.login_limit(request.client.host if request.client else "unknown")
+    key = data.key.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{5}", key):
+        raise HTTPException(403, "사용할 수 없는 키입니다.")
+    result = await key_access.rpc("verify_key", "", key=key, client_id=client_id)
+    license_id = result.get("license_id")
+    if not isinstance(license_id, str) or not 20 <= len(license_id) <= 100:
+        raise HTTPException(503, "인증 서버 응답을 확인하지 못했습니다.")
+    # Only the independent random session token leaves this endpoint. Never echo the key.
+    return {"token": sessions.create(license_id=license_id)}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, error):
+    if request.url.path == "/api/auth/login":
+        return JSONResponse(status_code=422, content={"detail": "5자리 영문·숫자 키를 입력하세요."})
+    return await request_validation_exception_handler(request, error)
+
+
+@app.websocket("/internal/key-agent")
+async def local_agent(websocket: WebSocket):
+    await key_access.websocket(websocket)
+
+
+async def license_check(sender):
+    license_id = sessions.for_sender(sender).license_id
+    if not license_id:
+        raise HTTPException(403, "키 인증이 필요합니다.")
+    return await key_access.rpc("check", license_id)
+
+
+def charge(sender, request_id):
+    async def consume():
+        license_id = sessions.for_sender(sender).license_id
+        if not license_id:
+            raise HTTPException(403, "키 인증이 필요합니다.")
+        result = await key_access.rpc("consume", license_id, request_id)
+        sessions.schedule_expiry(sender, result.get("expires"))
+    return consume
 
 
 @app.middleware("http")
@@ -97,6 +157,7 @@ async def state(sender: Sender = Depends(authorize)):
 @app.post("/api/board/connect")
 @app.post("/api/browser/open")
 async def connect_board(data: OpenRequest, sender: Sender = Depends(authorize)):
+    await license_check(sender)
     try:
         await sessions.open(sender, data.url)
     except ValueError as error:
@@ -106,7 +167,7 @@ async def connect_board(data: OpenRequest, sender: Sender = Depends(authorize)):
 
 @app.get("/api/browser/frame")
 async def browser_frame(sender: Sender = Depends(authorize)):
-    if not sender.browser or sender.running or sender.ready:
+    if not sender.browser or sender.deleting or sender.running or sender.ready:
         raise HTTPException(409, "브라우저 화면을 사용할 수 없습니다.")
     try:
         return Response(await sender.browser.screenshot(), media_type="image/jpeg")
@@ -121,31 +182,31 @@ async def browser_tabs(sender: Sender = Depends(authorize)):
 
 @app.post("/api/browser/action")
 async def browser_action(data: BrowserAction, sender: Sender = Depends(authorize)):
-    if not sender.browser:
-        raise HTTPException(409, "먼저 브라우저를 여세요.")
-    try:
-        await sender.browser.control(data)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
-    except Exception:
-        raise HTTPException(409, "조작을 완료하지 못했습니다. 화면을 확인하세요. 자동 재시도하지 않습니다.") from None
-    return sender.status()
+    # A remote click could post directly without a metered /api/run or /api/start.
+    raise HTTPException(410, "수동 브라우저 조작은 종료되었습니다. 웹 패널의 실행 버튼을 사용하세요.")
 
 
 @app.post("/api/start")
 async def start(data: SendRequest, sender: Sender = Depends(authorize)):
     try:
         await sender.start(data.subject, data.body, data.limit, data.delay,
-                           data.attachment, data.custom_properties)
+                           data.attachment, data.custom_properties,
+                           before_start=charge(sender, secrets.token_urlsafe(32)))
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     return sender.status()
 
 
 @app.post("/api/run")
-async def run(data: RunRequest, sender: Sender = Depends(authorize)):
+async def run(data: RunRequest, sender: Sender = Depends(authorize),
+              request_id: str = Header(default="", alias="X-Request-ID")):
+    if not 16 <= len(request_id) <= 100 or not all(c.isalnum() or c in "-_" for c in request_id):
+        raise HTTPException(400, "실행 요청 번호가 필요합니다.")
+    # Session-specific namespace prevents replay across independently authenticated browser sessions.
+    session_token = next(token for token, session in sessions.items.items() if session.sender is sender)
     try:
-        await sessions.run(sender, data)
+        await sessions.run(sender, data, before_start=charge(sender, session_token + ":" + request_id),
+                           request_id=request_id)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     return sender.status()
@@ -161,6 +222,15 @@ async def stop(sender: Sender = Depends(authorize)):
 async def reset(sender: Sender = Depends(authorize)):
     try:
         await sender.reset()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return sender.status()
+
+
+@app.post("/api/emergency-delete")
+async def emergency_delete(sender: Sender = Depends(authorize)):
+    try:
+        await sessions.delete(sender)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     return sender.status()

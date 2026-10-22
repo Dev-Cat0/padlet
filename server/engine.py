@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeoutError
 from .anonymous import padlet_url, prepare, check_response, read_sections, build_template
-from .browser import BrowserSession, BrowserHTTP, created_post
+from .browser import BrowserSession, BrowserHTTP, created_post, deletion_hashid
 from .errors import rejection_message
 from .fields import validate_fields, read_fields
 
@@ -70,6 +70,13 @@ class Sender:
         self.target_count = 1
         self.phase = "waiting"
         self.last_activity = time.monotonic()
+        self.deletion_batches = []
+        self.active_batch = None
+        self.deleting = False
+        self.delete_worker = None
+        self.deleted = self.delete_errors = self.untracked = 0
+        self.delete_retry_at = 0
+        self.closing = False
 
     def log(self, message, level="info"):
         self.sequence += 1
@@ -79,12 +86,22 @@ class Sender:
     def status(self):
         return {"ready": self.ready, "running": self.running, "opening": self.opening,
                 "browser": self.browser is not None,
-                "board": self.board, "phase": self.phase, "sent": self.sent, "errors": self.errors,
+                "board": self.board, "phase": "deleting" if self.deleting else self.phase,
+                "sent": self.sent, "errors": self.errors,
                 "limit": self.limit, "rounds": self.rounds, "target_count": self.target_count,
+                "deleting": self.deleting, "delete_pending": sum(len(b["posts"]) for b in self.deletion_batches),
+                "deleted": self.deleted, "delete_errors": self.delete_errors, "delete_untracked": self.untracked,
+                "delete_retry_after": max(0, math.ceil(self.delete_retry_at - time.monotonic())),
                 "logs": list(self.logs)}
 
     async def clear_connection(self):
         self.ready = False
+        if self.active_batch:
+            batch, self.active_batch = self.active_batch, None
+            try:
+                batch["snapshot"] = await self.browser.snapshot()
+            except Exception:
+                self.log("삭제용 익명 세션을 보관하지 못했습니다. 해당 게시물은 자동 삭제할 수 없습니다.", "error")
         if self.browser:
             browser, self.browser = self.browser, None
             await browser.close()
@@ -94,12 +111,14 @@ class Sender:
             await self.http.close()
             self.http = None
 
-    async def queue_run(self, url, subject, body, limit, delay):
+    async def queue_run(self, url, subject, body, limit, delay, before_start=None):
         """Accept one job promptly; all preparation happens in a fresh bot context."""
         url = padlet_url(url)
         async with self.lock:
-            if self.running or self.opening or self.worker and not self.worker.done():
+            if self.deleting or self.running or self.opening or self.worker and not self.worker.done():
                 raise ValueError("이미 진행 중인 작업이 있습니다.")
+            if before_start:
+                await before_start()
             self.stop_event.clear()
             self.sent = self.errors = self.rounds = 0
             self.limit, self.target_count = limit, 1
@@ -168,7 +187,7 @@ class Sender:
                 message = f"{stage} 중 내부 오류가 발생했습니다. 서버 로그를 확인하세요."
             self.log(message, "error")
         finally:
-            # Each run gets a new anonymous context. No user cookies are accepted.
+            # Close Chromium; retain only our bot's deletion credentials in memory.
             board = self.board
             await self.clear_connection()
             self.board = board
@@ -178,7 +197,7 @@ class Sender:
     async def open(self, url):
         url = padlet_url(url)
         async with self.lock:
-            if self.running or self.opening:
+            if self.deleting or self.running or self.opening:
                 raise ValueError("진행 중인 작업이 끝난 후 다시 여세요.")
             self.opening, self.phase = True, "opening"
             try:
@@ -198,7 +217,7 @@ class Sender:
 
     async def capture_browser(self, browser, page, endpoint, payload):
         async with self.lock:
-            if self.browser is not browser or self.ready or self.running:
+            if self.browser is not browser or self.ready or self.running or self.deleting:
                 return
             self.opening = True
             try:
@@ -237,7 +256,7 @@ class Sender:
     async def connect(self, url):
         url = padlet_url(url)
         async with self.lock:
-            if self.running or self.opening:
+            if self.deleting or self.running or self.opening:
                 raise ValueError("진행 중인 작업이 끝난 후 다시 연결하세요.")
             self.opening, self.phase = True, "opening"
             self.ready = False
@@ -260,15 +279,17 @@ class Sender:
             self.opening = False
             self.last_activity = time.monotonic()
 
-    async def start(self, subject, body, limit, delay, attachment="", custom_properties=None):
+    async def start(self, subject, body, limit, delay, attachment="", custom_properties=None, before_start=None):
         async with self.lock:
-            if not self.ready or self.opening:
+            if self.deleting or not self.ready or self.opening:
                 raise ValueError("먼저 브라우저에서 성공한 게시 요청을 캡처하세요.")
             if self.running:
                 raise ValueError("이미 전송 중입니다.")
             subject, body, fields = validate_fields((self.board or {}).get("fields"), subject, body,
                                                    attachment, custom_properties or {},
                                                    self.template.get("custom_properties") if self.browser else None)
+            if before_start:
+                await before_start()
             self.template.update(fields)
             self.stop_event.clear()
             self.sent = self.errors = self.rounds = 0
@@ -305,6 +326,7 @@ class Sender:
                     json=payload, headers=self.headers,
                     allow_redirects=False, timeout=10)
             except Exception:
+                self.untracked += 1  # The server may have created a post before the connection failed.
                 if self.browser:
                     self.ready = False
                 self.errors += 1
@@ -320,10 +342,23 @@ class Sender:
                 except (ValueError, TypeError):
                     success = False
             if success:
+                try:
+                    hashid = deletion_hashid(response.json())
+                except (AttributeError, ValueError, TypeError):
+                    hashid = None
+                if hashid and self.browser:
+                    if self.active_batch is None:
+                        self.active_batch = {"endpoint": self.endpoint, "posts": set(), "snapshot": None}
+                        self.deletion_batches.append(self.active_batch)
+                    self.active_batch["posts"].add(hashid)
+                else:
+                    self.untracked += 1
                 self.sent += 1
                 self.log(f"{label} · 전송 성공 #{self.sent}", "success")
                 return "ok", 0
             self.errors += 1
+            if status in {200, 201}:
+                self.untracked += 1
             paused.set()
             if status == 429 and not challenge:
                 try:
@@ -465,9 +500,97 @@ class Sender:
         if self.running:
             self.phase = "stopping"
 
+    async def queue_delete(self):
+        async with self.lock:
+            if self.deleting:
+                return  # Duplicate clicks reuse the same deletion job.
+            retry = math.ceil(self.delete_retry_at - time.monotonic())
+            if retry > 0:
+                raise ValueError(f"요청 제한으로 {retry}초 후 삭제를 다시 시도하세요.")
+            if self.opening and not self.automatic:
+                raise ValueError("게시판 연결이 끝난 후 삭제를 다시 시도하세요.")
+            self.deleting = True
+            self.delete_errors = 0
+            self.stop()
+            self.log("긴급 삭제 접수 · 새 전송을 중지하고 진행 중인 응답을 기다립니다.", "warning")
+            self.delete_worker = asyncio.create_task(self.delete_sent())
+
+    async def delete_sent(self):
+        board = self.board
+        try:
+            if self.worker and not self.worker.done():
+                await self.worker
+            board = self.board
+            await self.clear_connection()
+            for batch in list(self.deletion_batches):
+                if self.closing:
+                    break
+                if not batch["snapshot"]:
+                    self.delete_errors += len(batch["posts"])
+                    self.log("익명 세션이 없는 게시물은 삭제할 수 없습니다.", "error")
+                    continue
+                try:
+                    self.browser = BrowserSession(self)
+                    page = await self.browser.restore(batch["snapshot"])
+                    self.http = BrowserHTTP(page, batch["endpoint"])
+                    for hashid in list(batch["posts"]):
+                        if self.closing:
+                            break
+                        response = await self.http.delete(batch["endpoint"] + "/" + hashid, timeout=10)
+                        status = response.status_code
+                        challenge = response.headers.get("cf-mitigated") == "challenge"
+                        confirmed = status in {204, 404} and not challenge
+                        if status == 200 and not challenge:
+                            try:
+                                result = response.json()
+                                confirmed = isinstance(result, dict) and not result.get("error") and not result.get("errors")
+                            except (ValueError, TypeError):
+                                pass
+                        if confirmed:
+                            batch["posts"].remove(hashid)
+                            self.deleted += 1
+                            self.log(f"삭제 확인 #{self.deleted}", "success")
+                            continue
+                        self.delete_errors += 1
+                        if status == 429 and not challenge:
+                            try:
+                                retry = float(response.headers.get("Retry-After") or 30)
+                                retry = max(1, retry) if math.isfinite(retry) else 30
+                            except ValueError:
+                                retry = 30
+                            self.delete_retry_at = time.monotonic() + retry
+                            self.log(f"삭제 요청 제한 · {math.ceil(retry)}초 후 긴급 삭제를 다시 누르세요.", "warning")
+                            return
+                        self.log(f"삭제 실패 · HTTP {status}. 남은 게시물을 보관했습니다.", "error")
+                        break
+                except Exception:
+                    self.delete_errors += 1
+                    self.log("삭제 응답을 확인하지 못했습니다. 남은 게시물은 긴급 삭제로 다시 시도할 수 있습니다.", "error")
+                finally:
+                    if batch["posts"] and self.browser:
+                        try:
+                            batch["snapshot"] = await self.browser.snapshot()
+                        except Exception:
+                            pass  # Keep the last usable credentials if the browser failed.
+                    await self.clear_connection()
+                if not batch["posts"]:
+                    self.deletion_batches.remove(batch)
+        except Exception:
+            self.delete_errors += 1
+            self.log("긴급 삭제를 완료하지 못했습니다. 남은 게시물은 다시 시도할 수 있습니다.", "error")
+        finally:
+            await self.clear_connection()
+            self.board = board
+            self.deleting = False
+            self.phase = "delete_incomplete" if self.deletion_batches or self.untracked or self.delete_errors else "deleted"
+            remaining = sum(len(b["posts"]) for b in self.deletion_batches)
+            self.log(f"긴급 삭제 결과 · 삭제 확인 {self.deleted}건 / 남음 {remaining}건 / 추적 불가 {self.untracked}건",
+                     "warning" if self.phase == "delete_incomplete" else "success")
+            self.last_activity = time.monotonic()
+
     async def reset(self):
         async with self.lock:
-            if self.opening:
+            if self.deleting or self.opening:
                 raise ValueError("게시판 연결이 끝난 후 다시 시도하세요.")
             self.stop()
             if self.worker and not self.worker.done():
@@ -477,7 +600,11 @@ class Sender:
             self.log("브라우저 세션과 캡처 정보를 삭제했습니다.")
 
     async def shutdown(self):
+        self.closing = True
         self.stop()
+        if self.delete_worker and not self.delete_worker.done():
+            await self.delete_worker
         if self.worker and not self.worker.done():
             await self.worker
         await self.clear_connection()
+        self.deletion_batches.clear()

@@ -18,9 +18,17 @@ async def main():
     all_started = asyncio.Event()
     board_pages = []
     light_pages = []
+    deleted = []
 
     async def route(self, route):
         path = urlsplit(route.request.url).path
+        if route.request.method == "DELETE":
+            assert path.startswith("/api/9/wishes/post")
+            headers = await route.request.all_headers()
+            assert "guest=fixture" in headers.get("cookie", "")
+            assert headers["x-csrf-token"] == "fixture" and headers["x-uid"] == "fixture-uid"
+            deleted.append(path)
+            return await route.fulfill(status=204, body="")
         if path == "/example/board":
             board_pages.append(route.request.frame.page)
             return await route.fulfill(content_type="text/html",
@@ -52,6 +60,7 @@ async def main():
             return await route.fulfill(json={"data":[]})
         if path == "/api/9/wishes":
             posts.append(route.request.post_data_json)
+            post_id = len(posts)
             headers = await route.request.all_headers()
             assert "guest=fixture" in headers.get("cookie","")
             assert headers["x-csrf-token"] == "fixture" and headers["x-uid"] == "fixture-uid"
@@ -63,7 +72,8 @@ async def main():
                 await asyncio.wait_for(all_started.wait(), 3)
             if challenge:
                 return await route.fulfill(status=403, headers={"cf-mitigated":"challenge"},body="Verify")
-            return await route.fulfill(status=201,json={"data":{"id":len(posts)}})
+            return await route.fulfill(status=201,json={"data":{"id":post_id,
+                "attributes":{"hashid":f"post{post_id}"}}})
         await route.abort()
 
     sender = Sender()
@@ -89,9 +99,17 @@ async def main():
             assert sender.browser is None
             assert len(board_pages) == len(light_pages) == 3  # No second board load.
             assert all(page.is_closed() for page in light_pages)
+            assert sender.status()["delete_pending"] == 18
+            await sender.queue_delete()
+            await sender.delete_worker
+            assert sender.phase == "deleted" and sender.deleted == 18
+            assert set(deleted) == {f"/api/9/wishes/post{i}" for i in range(1, 19)}
+            assert len(deleted) == 18 and len(board_pages) == 3
+            assert sender.browser is None and not sender.deletion_batches
             print(json.dumps({"automatic_preparation":True,"all_sections_each_round":True,
                 "overlapping_rounds":True,"large_board_retired":True,"session_preserved":True,
-                "manual_steps":0,"challenge_stops":True,"real_posts":0}))
+                "emergency_deletion_restores_identity":True,
+                "manual_steps":0,"challenge_stops":True,"real_posts":0,"real_deletions":0}))
         finally:
             await sender.shutdown()
 

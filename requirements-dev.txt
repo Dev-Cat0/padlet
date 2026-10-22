@@ -1,4 +1,5 @@
 -r requirements.txt
+-r keybot/requirements.txt
 pytest==9.1.1
 httpx==0.28.1
 PyYAML==6.0.3

@@ -255,13 +255,13 @@ def test_only_one_browser_can_occupy_server_and_idle_browser_expires():
     asyncio.run(scenario())
 
 
-def test_browser_routes_require_auth_and_open_uses_capture(monkeypatch):
+def test_browser_routes_require_auth_and_open_uses_capture(monkeypatch, licensed_session):
     with TestClient(app) as client:
         for path in ["/api/browser/frame", "/api/browser/tabs"]:
             assert client.get(path).status_code == 401
         for path in ["/api/browser/open", "/api/browser/action"]:
             assert client.post(path, json={}).status_code == 401
-        token = client.post("/api/session", headers={"Origin": "https://dev-cat0.github.io"}, json={}).json()["token"]
+        token = licensed_session()
         headers = {"Authorization": "Bearer " + token}
         sender = sessions.items[token].sender
         sender.open = AsyncMock()
@@ -272,4 +272,6 @@ def test_browser_routes_require_auth_and_open_uses_capture(monkeypatch):
         sender.connect.assert_not_awaited()
         assert client.post("/api/browser/action", headers=headers,
                            json={"kind": "key", "key": "Control+l"}).status_code == 422
+        assert client.post("/api/browser/action", headers=headers,
+                           json={"kind": "click", "x": 10, "y": 10}).status_code == 410
         assert client.get("/api/browser/frame", headers=headers).status_code == 409

@@ -11,15 +11,13 @@ from server.engine import Sender, make_payload, padlet_url
 
 
 @pytest.fixture
-def client():
+def client(licensed_session):
     with TestClient(app) as client:
         yield client
 
 
 def session_auth(client):
-    response = client.post('/api/session', headers={'Origin':'https://dev-cat0.github.io'}, json={})
-    assert response.status_code == 200
-    return {'Authorization':'Bearer ' + response.json()['token']}
+    return {'Authorization':'Bearer ' + sessions.create(license_id='test-license')}
 
 
 def test_private_endpoints_fail_closed(client):
@@ -67,9 +65,7 @@ def test_automatic_sessions_are_isolated_and_resume(client):
 
 def test_session_creation_checks_origin_and_rate_limit(client):
     assert client.post('/api/session', headers={'Origin':'https://evil.example'}, json={}).status_code == 403
-    for _ in range(20):
-        session_auth(client)
-    assert client.post('/api/session', headers={'Origin':'https://dev-cat0.github.io'}, json={}).status_code == 429
+    assert client.post('/api/session', headers={'Origin':'https://dev-cat0.github.io'}, json={}).status_code == 403
 
 
 def test_session_cleanup_expires_idle_but_keeps_running():

@@ -183,14 +183,16 @@ def test_duplicate_job_and_other_session_cannot_start_parallel_browser(monkeypat
     asyncio.run(scenario())
 
 
-def test_run_api_only_needs_five_fields_and_does_not_take_user_auth(monkeypatch):
+def test_run_api_uses_discord_session_and_five_fields(monkeypatch, licensed_session):
     with TestClient(app) as client:
         assert client.post("/api/run",json={}).status_code == 401
-        token = client.post("/api/session",headers={"Origin":"https://dev-cat0.github.io"},json={}).json()["token"]
+        token = licensed_session()
         sender = sessions.items[token].sender
         sender.queue_run = AsyncMock()
         data = {"url":URL,"subject":"Title","body":"Body","limit":3,"delay":.5}
-        result = client.post("/api/run",headers={"Authorization":"Bearer "+token},json=data)
+        headers = {"Authorization":"Bearer "+token, "X-Request-ID": "request-test-00001"}
+        result = client.post("/api/run",headers=headers,json=data)
         assert result.status_code == 200
-        sender.queue_run.assert_awaited_once_with(URL,"Title","Body",3,.5)
+        assert sender.queue_run.await_args.args == (URL,"Title","Body",3,.5)
+        assert callable(sender.queue_run.await_args.kwargs["before_start"])
         assert client.post("/api/run",headers={"Authorization":"Bearer "+token},json={**data,"limit":-1}).status_code == 422

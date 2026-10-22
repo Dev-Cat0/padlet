@@ -1,7 +1,7 @@
 name: Server checks
 on:
   push:
-    paths: ['server/**', 'web/**', 'tests/**', 'requirements*.txt', 'Dockerfile', '.github/workflows/test.yml']
+    paths: ['server/**', 'keybot/**', 'web/**', 'tests/**', 'requirements*.txt', 'Dockerfile', '.github/workflows/test.yml']
   pull_request:
 permissions:
   contents: read
