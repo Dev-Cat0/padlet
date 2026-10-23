@@ -18,6 +18,7 @@ from .sessions import Sessions
 from .key_access import KeyAccess
 from .license_admin import routes as license_routes
 from .audit import worker as audit_worker
+from .post_limits import post_limit, STANDARD_POST_LIMIT
 
 sessions = Sessions()
 key_access = KeyAccess()
@@ -110,11 +111,16 @@ async def license_check(sender):
     return result
 
 
-def charge(sender, request_id):
+def charge(sender, request_id, limit):
     async def consume():
         license_id = sessions.for_sender(sender).license_id
         if not license_id:
             raise HTTPException(403, "키 인증이 필요합니다.")
+        # Check the authoritative plan before charging. Zero remains unlimited for every plan.
+        if limit > STANDARD_POST_LIMIT:
+            access = await license_check(sender)
+            if limit > post_limit(access):
+                raise HTTPException(400, "영구 플랜 외에는 섹션당 최대 5,000개까지 지정할 수 있습니다. 0(무제한)은 사용할 수 있습니다.")
         try:
             result = await key_access.rpc("consume", license_id, request_id)
         except HTTPException as error:
@@ -232,7 +238,7 @@ async def start(data: SendRequest, sender: Sender = Depends(authorize)):
     try:
         await sender.start(data.subject, data.body, data.limit, data.delay,
                            data.attachment, data.custom_properties,
-                           before_start=charge(sender, secrets.token_urlsafe(32)))
+                           before_start=charge(sender, secrets.token_urlsafe(32), data.limit))
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     return sessions.status(sender)
@@ -246,7 +252,7 @@ async def run(data: RunRequest, sender: Sender = Depends(authorize),
     # Session-specific namespace prevents replay across independently authenticated browser sessions.
     session_token = next(token for token, session in sessions.items.items() if session.sender is sender)
     try:
-        await sessions.run(sender, data, before_start=charge(sender, session_token + ":" + request_id),
+        await sessions.run(sender, data, before_start=charge(sender, session_token + ":" + request_id, data.limit),
                            request_id=request_id)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None

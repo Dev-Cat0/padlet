@@ -41,6 +41,37 @@ def issue(store, amount=1, kind='uses'):
     return item
 
 
+@pytest.mark.parametrize('kind', ['uses', 'days', 'month', 'year', 'forever'])
+@pytest.mark.parametrize('limit', [0, 5000, 5001])
+@pytest.mark.parametrize('endpoint', ['/api/run', '/api/start'])
+def test_plan_post_limit_before_charge(ledger, monkeypatch, kind, limit, endpoint):
+    from server.app import app, sessions
+    from server.engine import Sender
+
+    # Exercise real request admission and charging without opening a browser or posting.
+    job = AsyncMock()
+    monkeypatch.setattr(Sender, 'automatic_run', job)
+    monkeypatch.setattr(Sender, 'run', job)
+    key = issue(ledger, kind=kind)
+    with TestClient(app) as client:
+        token = sessions.create(license_id=key['id'])
+        sender = sessions.items[token].sender
+        sender.ready = True
+        headers = {'Authorization': 'Bearer ' + token, 'X-Request-ID': 'limit-check-00000001'}
+        response = client.post(endpoint, headers=headers,
+                               json={'url': 'https://padlet.com/example/board', 'subject': 'Local test', 'limit': limit})
+        allowed = kind == 'forever' or limit <= 5000
+        assert response.status_code == (200 if allowed else 400), response.text
+        assert job.call_count == int(allowed)
+        with ledger.db() as db:
+            used = db.execute("SELECT COUNT(*) FROM audit_events WHERE kind='used'").fetchone()[0]
+            assert used == int(allowed)
+            if kind == 'uses':
+                assert db.execute('SELECT remaining FROM licenses WHERE id=?', (key['id'],)).fetchone()[0] == 1 - int(allowed)
+        access = client.get('/api/state', headers=headers).json()['access']
+        assert access['post_limit'] == (1000000 if kind == 'forever' else 5000)
+
+
 @pytest.mark.parametrize('amount', [1, 2, 3])
 def test_login_run_stop_repeat_without_bot(ledger, monkeypatch, amount):
     from server.app import app

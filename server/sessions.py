@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from fastapi import HTTPException
 
 from .engine import Sender
+from .post_limits import post_limit
 
 
 @dataclass
@@ -63,7 +64,8 @@ class Sessions:
         for session in self.items.values():
             if session.license_id == license_id:
                 session.access = {"known": "remaining" in result, "remaining": result.get("remaining"),
-                                  "expires": result.get("expires"), "blocked": False}
+                                  "expires": result.get("expires"), "blocked": False,
+                                  "post_limit": post_limit(result)}
 
     def block_access(self, sender):
         license_id = self.for_sender(sender).license_id

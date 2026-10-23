@@ -59,6 +59,18 @@ def main():
         page.wait_for_function("() => !document.getElementById('start').disabled")
         assert page.locator('#authGate').is_hidden()
         assert page.locator("#sendForm input,#sendForm textarea").count()==5
+        count = page.locator('#limit')
+        for value, valid in [('0', True), ('5000', True), ('5001', False)]:
+            count.fill(value)
+            assert count.evaluate('el => el.checkValidity()') == valid
+        state['access'].update(remaining=None, post_limit=1000000)
+        page.evaluate('s => render(s)', state)
+        assert count.evaluate('el => el.checkValidity()')
+        assert count.get_attribute('min') == '0'
+        state['access'].update(remaining=1, post_limit=5000)
+        page.evaluate('s => render(s)', state)
+        assert not count.evaluate('el => el.checkValidity()')
+        assert '0은 무제한' in page.locator('#limitHint').inner_text()
         page.locator("#url").fill("https://padlet.com/example/board")
         page.locator("#subject").fill("Test title")
         page.locator("#body").fill("Test body")

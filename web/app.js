@@ -61,6 +61,11 @@ function renderAccess(next) {
     else text='영구 이용권';
   } else if(access?.blocked) text='키가 만료·폐기되었거나 사용 횟수가 소진되었습니다.';
   $('accessStatus').textContent=text;
+  const countLimit=access?.post_limit??5000;
+  $('limit').max=String(countLimit);
+  $('limitHint').textContent=countLimit===5000
+    ?'모든 섹션에 각각 최대 5,000개 · 0은 무제한'
+    :'모든 섹션에 각각 이 개수만큼 · 0은 무제한';
   $('start').disabled=!connected||active||submitting||accessBlocked(access);
   $('start').textContent=submitting?'접수 중…':active?'진행 중…':expired?'이용 기한 만료':access?.remaining===0?'실행 횟수 소진':'▶ 실행';
 }
