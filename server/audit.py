@@ -49,18 +49,28 @@ def event_message(event):
 def send_event(url, event):
     payload = json.dumps(event_message(event)).encode('utf-8')
     request = Request(url + '?wait=true', data=payload,
-                      headers={'Content-Type': 'application/json', 'User-Agent': 'PadletLicenseAudit/2'})
+                      headers={'Content-Type': 'application/json',
+                               'User-Agent': 'DiscordBot (https://dev-cat0.github.io/padlet/, 2.0)'})
     try:
         with urlopen(request, timeout=10) as response:
             return 200 <= response.status < 300, 30
     except HTTPError as error:
+        try:
+            details = json.loads(error.read(4096))
+        except (ValueError, OSError):
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+        # Never log the exception string: it may include the secret webhook URL.
+        logging.getLogger(__name__).warning('Discord audit HTTP %s (API code %s)', error.code, details.get('code', 'unknown'))
         if error.code == 429:
             try:
-                return False, min(3600, max(1, float(json.loads(error.read(4096))['retry_after'])))
+                return False, min(3600, max(1, float(details['retry_after'])))
             except (ValueError, KeyError, TypeError):
                 pass
         return False, 60
-    except Exception:
+    except Exception as error:
+        logging.getLogger(__name__).warning('Discord audit transport failure (%s)', type(error).__name__)
         return False, 30
 
 
