@@ -4,6 +4,8 @@
 keybot
 start-keybot.*
 configure-keybot.cmd
+stop-keybot.cmd
+status-keybot.cmd
 .local
 .env*
 __pycache__

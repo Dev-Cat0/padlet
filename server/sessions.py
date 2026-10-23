@@ -18,6 +18,7 @@ class PanelSession:
     license_id: str = ""
     accepted: dict = field(default_factory=dict)
     expiry_task: asyncio.Task | None = None
+    access: dict = field(default_factory=lambda: {"known": False})
 
 
 class Sessions:
@@ -57,8 +58,29 @@ class Sessions:
     def for_sender(self, sender):
         return next(s for s in self.items.values() if s.sender is sender)
 
+    def update_access(self, license_id, result):
+        # Share the balance across tabs logged in with the same license; never expose its ID/key.
+        for session in self.items.values():
+            if session.license_id == license_id:
+                session.access = {"known": "remaining" in result, "remaining": result.get("remaining"),
+                                  "expires": result.get("expires"), "blocked": False}
+
+    def block_access(self, sender):
+        license_id = self.for_sender(sender).license_id
+        for session in self.items.values():
+            if session.license_id == license_id:
+                session.access = {**session.access, "blocked": True}
+
+    def status(self, sender):
+        access = self.for_sender(sender).access.copy()
+        expires = access.get("expires")
+        access["expired"] = expires is not None and time.time() >= expires
+        access["can_run"] = not (access.get("blocked") or access["expired"] or access.get("remaining") == 0)
+        return {**sender.status(), "access": access}
+
     def schedule_expiry(self, sender, expires):
         session = self.for_sender(sender)
+        sender.license_expires = expires
         if session.expiry_task:
             session.expiry_task.cancel()
         if expires is None:

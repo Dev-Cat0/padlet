@@ -20,9 +20,11 @@ if ($LASTEXITCODE -ne 0) {
     & $taskPython -m pip install -r keybot/requirements.txt
     if ($LASTEXITCODE -ne 0) { throw '봇 패키지를 설치하지 못했습니다.' }
 }
-& $taskPython -c "import json,pathlib,sys; p=pathlib.Path('.local/keybot/config.json'); c=json.loads(p.read_text()) if p.exists() else {}; sys.exit(0 if c.get('DISCORD_BOT_TOKEN') and c.get('DISCORD_GUILD_ID') else 1)"
+& $taskPython -m keybot.setup --connection-only
+if ($LASTEXITCODE -ne 0) { throw '서버 연결 설정을 읽지 못했습니다.' }
+& $taskPython -c "import json,pathlib,sys; p=pathlib.Path('.local/keybot/config.json'); c=json.loads(p.read_text()) if p.exists() else {}; sys.exit(0 if c.get('DISCORD_BOT_TOKEN') and c.get('DISCORD_GUILD_ID') and c.get('KEY_ADMIN_SECRET') else 1)"
 if ($LASTEXITCODE -ne 0) {
     & $taskPython -m keybot.setup
     if ($LASTEXITCODE -ne 0) { throw '봇 설정을 완료하세요.' }
 }
-& $taskPython -m keybot
+& $taskPython -m keybot.control start

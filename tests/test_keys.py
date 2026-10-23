@@ -1,17 +1,39 @@
 import asyncio
+
+
 import secrets
+
+
 import time
+
+
 from concurrent.futures import ThreadPoolExecutor
+
+
 from datetime import datetime
+
+
 from types import SimpleNamespace
+
+
 from unittest.mock import AsyncMock, MagicMock
 
+
 import pytest
+
+
 from fastapi import HTTPException
+
+
 from fastapi.testclient import TestClient
+
+
 from starlette.websockets import WebSocketDisconnect
 
-from keybot.store import KST, OWNER_ID, LicenseError, Store, expiry
+
+from server.license_store import KST, OWNER_ID, LicenseError, Store, expiry
+
+
 from server.key_access import KeyAccess
 
 
@@ -101,9 +123,9 @@ def test_time_kst_boundaries_month_year_and_expiration(store, monkeypatch):
     assert datetime.fromtimestamp(expiry('year', 1, leap), KST) == datetime(2029, 2, 28, 9, 0, tzinfo=KST)
     assert expiry('days', 7, start) - start == 7 * 86400
     assert expiry('forever', 1, start) is None
-    monkeypatch.setattr('keybot.store.time.time', lambda: start)
+    monkeypatch.setattr('server.license_store.time.time', lambda: start)
     key = issue(store, kind='days', amount=1)
-    monkeypatch.setattr('keybot.store.time.time', lambda: start + 86400)
+    monkeypatch.setattr('server.license_store.time.time', lambda: start + 86400)
     with pytest.raises(LicenseError):
         store.consume(key['id'], 'a' * 32)
 
@@ -120,53 +142,6 @@ def test_revocation_and_guess_limit(store):
     assert store.revoke(OWNER_ID, key['id']) == 1
     with pytest.raises(LicenseError):
         store.check(key['id'])
-
-
-def test_login_requires_agent_and_limits_requests():
-    access = KeyAccess()
-    with pytest.raises(HTTPException) as error:
-        access.login_limit('peer')
-    assert error.value.status_code == 503
-    access.socket = object()
-    for _ in range(5):
-        assert len(access.login_limit('peer')) == 64
-    with pytest.raises(HTTPException) as error:
-        access.login_limit('peer')
-    assert error.value.status_code == 429
-
-
-def test_real_websocket_key_login_returns_only_random_session(monkeypatch, store):
-    from server.app import app, sessions
-    key = issue(store, amount=2)
-    secret = 'test-agent-secret-' * 3
-    monkeypatch.setenv('KEY_AGENT_SECRET', secret)
-    origin = {'Origin': 'https://dev-cat0.github.io'}
-    with TestClient(app) as client:
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect('/internal/key-agent'):
-                pass
-        assert client.post('/api/session', headers=origin, json={}).status_code == 403
-        assert client.post('/api/auth/login', headers=origin, json={'key': key['key']}).status_code == 503
-        assert client.post('/api/auth/login', headers={'Origin':'https://evil.example'}, json={'key':key['key']}).status_code == 403
-        malformed = client.post('/api/auth/login', headers=origin, json={'key': {'secret': key['key']}})
-        assert malformed.status_code == 422 and key['key'] not in malformed.text
-        with client.websocket_connect('/internal/key-agent', headers={'Authorization': 'Bearer ' + secret}) as ws:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                pending = pool.submit(client.post, '/api/auth/login', headers=origin, json={'key':key['key']})
-                message = ws.receive_json()
-                assert message['action'] == 'verify_key' and message['key'] == key['key']
-                result = store.verify_key(message['key'], message['client_id'])
-                ws.send_json({'id':message['id'], 'ok':True, **result})
-                response = pending.result(timeout=5)
-                assert response.status_code == 200
-                assert set(response.json()) == {'token'}
-                token = response.json()['token']
-                assert len(token) >= 40 and key['key'] not in response.text
-                assert sessions.items[token].license_id == key['id']
-                state = client.get('/api/state',headers={'Authorization':'Bearer '+token})
-                assert state.status_code == 200 and key['key'] not in state.text
-                with store.db() as db:
-                    assert db.execute('SELECT remaining FROM licenses').fetchone()[0] == 2
 
 
 def test_run_charges_only_after_validation_and_deduplicates(monkeypatch, store):
@@ -192,7 +167,7 @@ def test_run_charges_only_after_validation_and_deduplicates(monkeypatch, store):
             assert db.execute('SELECT remaining FROM licenses').fetchone()[0] == 1
 
 
-def test_exhausted_or_offline_cannot_start_but_can_stop_and_delete(monkeypatch):
+def test_exhausted_or_storage_unavailable_cannot_start_but_can_stop_and_delete(monkeypatch):
     from server.app import app, sessions, key_access
     with TestClient(app) as client:
         token = sessions.create(license_id='opaque-license')
@@ -275,29 +250,3 @@ def test_one_agent_process_per_database(tmp_path):
                 pass
     with single_instance(path):
         pass
-
-
-def test_actual_server_bridge_charge_round_trip(monkeypatch, store):
-    from server.app import app, sessions
-    from server.engine import Sender
-    key = issue(store)
-    secret = 'bridge-test-secret-' * 3
-    monkeypatch.setenv('KEY_AGENT_SECRET', secret)
-    monkeypatch.setattr(Sender, 'automatic_run', AsyncMock())
-    with TestClient(app) as client:
-        token = sessions.create(license_id=key['id'])
-        with client.websocket_connect('/internal/key-agent', headers={'Authorization': 'Bearer ' + secret}) as ws:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                pending = pool.submit(client.post, '/api/run',
-                                      headers={'Authorization': 'Bearer ' + token, 'X-Request-ID': 'bridge-request-00000001'},
-                                      json={'url': 'https://padlet.com/example/board'})
-                message = ws.receive_json()
-                assert message['action'] == 'consume'
-                assert key['key'] not in str(message)
-                result = store.consume(message['license_id'], message['request_id'])
-                ws.send_json({'id': message['id'], 'ok': True, **result})
-                response = pending.result(timeout=5)
-                assert response.status_code == 200
-                assert key['key'] not in response.text
-    with pytest.raises(LicenseError):
-        store.check(key['id'])

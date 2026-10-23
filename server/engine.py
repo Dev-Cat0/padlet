@@ -77,6 +77,7 @@ class Sender:
         self.deleted = self.delete_errors = self.untracked = 0
         self.delete_retry_at = 0
         self.closing = False
+        self.license_expires = None
 
     def log(self, message, level="info"):
         self.sequence += 1
@@ -308,6 +309,9 @@ class Sender:
 
     async def send_section(self, section, subject, body, semaphore, paused):
         async with semaphore:
+            # Deadline is checked at dispatch as well as by the expiry timer.
+            if self.license_expires is not None and time.time() >= self.license_expires:
+                self.stop_event.set()
             # Never cancel a POST already in flight: its result may be ambiguous.
             if self.stop_event.is_set() or paused.is_set():
                 return "pending", 0

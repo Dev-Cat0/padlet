@@ -5,7 +5,7 @@ from datetime import datetime
 import discord
 from discord import app_commands
 
-from .store import KST, OWNER_ID, LicenseError
+from .client import KST, OWNER_ID, LOG_CHANNEL_ID, LicenseError
 
 
 def grant_label(grant):
@@ -50,7 +50,12 @@ class IssuePanel(discord.ui.View):
     @discord.ui.button(label="키 발급받기 · DM", style=discord.ButtonStyle.primary, custom_id="padlet:issue:v1")
     async def issue(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
-        grants = await asyncio.to_thread(self.bot.store.available, interaction.user.id)
+        if interaction.guild_id != self.bot.guild_id:
+            return await interaction.followup.send('설정된 서버에서 사용하세요.', ephemeral=True)
+        try:
+            grants = await asyncio.to_thread(self.bot.store.available, interaction.user.id)
+        except Exception as error:
+            return await reply_error(interaction, error)
         if not grants:
             return await interaction.followup.send("관리자가 지급한 발급권이 없습니다. 문의 티켓을 열어주세요.", ephemeral=True)
         if len(grants) == 1:
@@ -104,6 +109,7 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.ticket_lock = asyncio.Lock()
         self.delivery_lock = asyncio.Lock()
+        self.logs_configured = False
         self.register_commands()
 
     async def setup_hook(self):
@@ -115,6 +121,23 @@ class Bot(discord.Client):
 
     async def on_ready(self):
         logging.getLogger(__name__).info("Discord bot ready")
+        if not self.logs_configured:
+            try:
+                await self.configure_logs()
+            except Exception as error:
+                logging.getLogger(__name__).warning('로그 연결 실패 (%s). 지정 채널의 웹후크 관리 권한 확인 후 /로그설정', type(error).__name__)
+
+    async def configure_logs(self):
+        channel = self.get_channel(LOG_CHANNEL_ID) or await self.fetch_channel(LOG_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != self.guild_id:
+            raise LicenseError('지정한 로그 채널이 설정된 서버에 없습니다.')
+        hooks = await channel.webhooks()
+        webhook = next((h for h in hooks if h.user and h.user.id == self.user.id and h.name == 'Padlet 이용권 로그'), None)
+        if webhook is None:
+            webhook = await channel.create_webhook(name='Padlet 이용권 로그', reason='Requested license issuance and usage audit')
+        await asyncio.to_thread(self.store.call, 'configure_log', channel=LOG_CHANNEL_ID, webhook=webhook.url)
+        self.logs_configured = True
+        logging.getLogger(__name__).info('키 서버 및 로그 채널 연결 완료')
 
     async def deliver(self, interaction, user, grant_id):
         # Serialize DM delivery; DB transactions also protect duplicate button interactions.
@@ -132,11 +155,14 @@ class Bot(discord.Client):
                                 f"발급 번호: `{license['id']}`\n"
                                 "웹사이트에 접속한 뒤 키 입력 창에서 인증하세요.\n"
                                 "키를 아는 사람은 이용할 수 있으므로 타인에게 공유하지 마세요.")
-                await asyncio.to_thread(self.store.delivered, license["id"])
+                await asyncio.to_thread(self.store.delivered, license["id"], user.id)
                 await interaction.followup.send("키를 대상자의 DM으로 보냈습니다.", ephemeral=True)
             except Exception as error:
                 if license:
-                    await asyncio.to_thread(self.store.delivery_failed, license["id"])
+                    try:
+                        await asyncio.to_thread(self.store.delivery_failed, license["id"], user.id)
+                    except Exception:
+                        pass  # The server recovers unconfirmed deliveries after ten minutes.
                 await reply_error(interaction, error)
 
     def register_commands(self):
@@ -201,3 +227,10 @@ class Bot(discord.Client):
             await interaction.response.defer(ephemeral=True)
             await asyncio.to_thread(self.store.revoke_grants, interaction.user.id, 대상.id)
             await interaction.followup.send("미사용 발급권을 회수했습니다. 이미 발급한 키는 별도로 폐기하세요.", ephemeral=True)
+
+        @self.tree.command(name='로그설정', description='관리자: 지정 로그 채널의 서버 웹훅 연결 또는 복구')
+        @app_commands.check(owner)
+        async def configure_log(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+            await self.configure_logs()
+            await interaction.followup.send(f'<#{LOG_CHANNEL_ID}> 로그 연결 완료. 봇 종료 후에도 사용 로그를 기록합니다.', ephemeral=True)

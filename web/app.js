@@ -44,12 +44,31 @@ $('keyForm').onsubmit=async event=>{
   finally{body.key='';authenticating=false;$('keySubmit').disabled=false;}
 };
 $('reauth').onclick=beginAuth;
+function accessBlocked(access) {
+  return !access?.known || access.can_run===false || access.remaining===0 ||
+    (access.expires!==null && access.expires!==undefined && Date.now()>=access.expires*1000);
+}
+function renderAccess(next) {
+  const access=next.access, active=next.running||next.opening||next.deleting||next.phase==='stopping';
+  const expired=access?.expired || (access?.expires!=null && Date.now()>=access.expires*1000);
+  let text='이용권 정보를 확인할 수 없습니다. 새로고침 후 다시 인증하세요.';
+  if(access?.known) {
+    if(expired) text='시간제 키 만료 · 새 실행이 차단되었습니다.';
+    else if(access.remaining===0) text='남은 실행 0회 · 모두 사용했습니다. 새 키로 다시 인증하세요.';
+    else if(access.blocked) text='사용할 수 없는 키입니다. 새 키로 다시 인증하세요.';
+    else if(access.remaining!==null) text='남은 실행 '+access.remaining+'회 · 실행 접수 1번당 1회 차감';
+    else if(access.expires!==null) text='이용 기한: '+new Date(access.expires*1000).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'})+' (UTC+9)';
+    else text='영구 이용권';
+  } else if(access?.blocked) text='키가 만료·폐기되었거나 사용 횟수가 소진되었습니다.';
+  $('accessStatus').textContent=text;
+  $('start').disabled=!connected||active||submitting||accessBlocked(access);
+  $('start').textContent=submitting?'접수 중…':active?'진행 중…':expired?'이용 기한 만료':access?.remaining===0?'실행 횟수 소진':'▶ 실행';
+}
 function render(next) {
   state=next;
   const active=next.running||next.opening||next.deleting||next.phase==='stopping';
-  $('start').disabled=!connected||active||submitting;
+  renderAccess(next);
   $('reauth').disabled=active||submitting;
-  $('start').textContent=submitting?'접수 중…':active?'진행 중…':'▶ 실행';
   $('stop').disabled=!connected||!active||next.deleting||next.phase==='stopping';
   $('emergencyDelete').disabled=!connected||submitting||next.deleting||next.delete_retry_after>0||(!active&&!next.delete_pending);
   $('emergencyDelete').textContent=next.deleting?'삭제 중…':'긴급 삭제';
@@ -90,7 +109,7 @@ async function connect(){
   }catch(error){notice(message(error));if(error.status===401){beginAuth();return;}authMessage(message(error));timer=setTimeout(connect,3000);}
 }
 $('sendForm').onsubmit=async event=>{
-  event.preventDefault();if(!connected||submitting||state?.running||state?.opening||state?.deleting)return;
+  event.preventDefault();if(!connected||submitting||state?.running||state?.opening||state?.deleting||accessBlocked(state?.access))return;
   submitting=true;notice();if(state)render(state);
   try{render(await api('/api/run',{url:$('url').value.trim(),subject:$('subject').value,body:$('body').value,limit:Number($('limit').value),delay:Number($('delay').value)}, {'X-Request-ID':crypto.randomUUID()}));}
   catch(error){notice(message(error));try{render(await api('/api/state'));}catch(_){connected=false;}}
@@ -106,4 +125,5 @@ $('emergencyDelete').onclick=async()=>{
 };
 window.addEventListener('pagehide',()=>{generation++;authGeneration++;clearTimeout(timer);});
 window.addEventListener('pageshow',event=>{if(event.persisted)connect();});
+setInterval(()=>{if(state&&token)renderAccess(state);},500);
 connect();
