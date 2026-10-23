@@ -41,6 +41,8 @@ def event_message(event):
             lines.append('잔여 기간: 영구')
     if 'count' in data:
         lines.append(f'폐기한 키: {data["count"]}개')
+    if data.get('scope'):
+        lines.append('폐기 범위: ' + data['scope'])
     return {'content': '\n'.join(lines), 'allowed_mentions': {'parse': []}}
 
 
@@ -63,8 +65,10 @@ def send_event(url, event):
 
 
 async def worker(access):
+    maintenance_at = 0
     while True:
-        delay = 5
+        access.audit_signal.clear()
+        delay = 60
         try:
             if access.store:
                 store = access.store
@@ -75,7 +79,12 @@ async def worker(access):
                         delivered, retry = await asyncio.to_thread(send_event, url, event)
                         await asyncio.to_thread(store.finish_event, event['id'], delivered, retry)
                         delay = .5 if delivered else retry
-                await asyncio.to_thread(store.delivery_failed, older_than=time.time() - 600)
+                if time.monotonic() >= maintenance_at:
+                    await asyncio.to_thread(store.maintenance)
+                    maintenance_at = time.monotonic() + 600
         except Exception as error:
             logging.getLogger(__name__).warning('Audit queue unavailable (%s)', type(error).__name__)
-        await asyncio.sleep(delay)
+        try:
+            await asyncio.wait_for(access.audit_signal.wait(), timeout=delay)
+        except TimeoutError:
+            pass

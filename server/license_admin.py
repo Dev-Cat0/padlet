@@ -47,9 +47,7 @@ def routes(access, sessions):
             if action in {'delivered', 'delivery_failed'}:
                 # Only a key's recipient can finish its delivery, even over signed transport.
                 def finish():
-                    with store.db() as db:
-                        row = db.execute('SELECT user_id FROM licenses WHERE id=?', (data.license_id,)).fetchone()
-                    if not row or row['user_id'] != str(data.actor):
+                    if store.owner_for(data.license_id) != str(data.actor):
                         raise LicenseError('발급 대상이 다릅니다.')
                     getattr(store, action)(data.license_id)
                 await asyncio.to_thread(finish)
@@ -91,5 +89,7 @@ def routes(access, sessions):
             raise
         except Exception:
             raise HTTPException(503, '키 저장소 처리 실패. 잠시 후 다시 확인하세요.') from None
+        finally:
+            access.audit_signal.set()
 
     return router

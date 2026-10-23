@@ -51,7 +51,7 @@
 
 ## 저장과 보안
 
-키·발급권·차감·로그는 웹 서버의 영구 PostgreSQL 저장소에 있습니다. 봇 PC에는 Discord 설정과 서버 관리 연결 자격 정보만 필요합니다. 구버전 로컬 키 DB는 더 이상 사용하지 않습니다. v2 전환 시 기존 키는 이전하지 않으며 기존 웹 세션도 종료됩니다.
+키·발급권·차감·로그는 Firebase Cloud Firestore 저장소에 있습니다. 봇 PC에는 Discord 설정과 서버 관리 연결 자격 정보만 필요합니다. 구버전 로컬 키 DB는 더 이상 사용하지 않습니다. v2 전환 시 기존 키는 이전하지 않으며 기존 웹 세션도 종료됩니다.
 
 무작위 영문·숫자 5자리 원문은 DM과 최초 웹 인증 요청에서만 사용합니다. DB에는 서버 전용 비밀값으로 계산한 HMAC만 저장합니다. 로그인 후에는 별도의 임의 세션 토큰을 사용하며 키는 브라우저 저장소에 저장하지 않습니다. **자신이 입력한 최초 인증 요청은 자신의 개발자 도구에서 볼 수 있습니다.** 다른 사람의 키 목록·관리 연결 비밀값은 웹에 보내지 않습니다.
 
@@ -59,8 +59,19 @@
 
 ## 서버 운영
 
-기존 Render 웹 서비스에 `KEY_DATABASE_URL` (내부 PostgreSQL 연결 주소), `KEY_HASH_SECRET`, `KEY_ADMIN_SECRET`을 비공개 환경 변수로 설정합니다. 로컬 봇의 `.local/keybot/connection.json`에는 SERVER_URL과 같은 KEY_ADMIN_SECRET을 설정합니다. Discord 봇 토큰은 Render에 넣지 않습니다.
+웹 서버와 패들렛 전송은 기존 Render에 유지하고, DB만 Firebase Cloud Firestore를 사용합니다. 브라우저는 Firestore에 직접 접근하지 않습니다. `firestore.rules`는 클라이언트 읽기·쓰기를 모두 거부합니다.
 
-Free Render의 임시 디스크에 키 DB를 저장하면 재배포 시 잔여 횟수가 사라지므로 운영 서버에서는 허용하지 않습니다. PostgreSQL 연결은 최대 3개로 제한하며 Discord 봇·Gateway는 웹 서버에서 실행하지 않습니다. 발급·로그가 증가하면 DB 보관 용량을 확인하세요.
+기존 Render 웹 서비스의 비공개 환경 변수:
+- `FIREBASE_PROJECT_ID`: Firebase 프로젝트 ID.
+- `FIREBASE_SERVICE_ACCOUNT_JSON`: 해당 프로젝트 서비스 계정 JSON 전체. 서버에서만 사용합니다. 대안으로 Render Secret File과 `GOOGLE_APPLICATION_CREDENTIALS`를 사용해도 됩니다.
+- `KEY_HASH_SECRET`: 키 해시용 서버 비밀값. 기존 키 사용 중에는 임의로 변경하지 않습니다.
+- `KEY_ADMIN_SECRET`: 로컬 봇과 서버의 관리 API 서명 비밀값.
+- `FIREBASE_DATABASE_ID`: 기본 DB를 사용하면 생략합니다.
 
-검증: `python -m pytest -q`, `python tests/ui_smoke.py`. GitHub CI는 실제 PostgreSQL에서 동시 차감과 잔여 횟수 보존도 확인합니다.
+Firestore Standard의 `(default)` DB를 생성하고 `firebase deploy --only firestore --project 프로젝트ID`로 규칙·인덱스를 배포합니다. 서비스 계정에는 해당 프로젝트의 Cloud Datastore User 역할만 부여합니다. JSON 비밀 키와 관리 비밀값은 Git·웹 자산에 넣지 않습니다. 서버 SDK는 보안 규칙 대신 IAM 권한으로 접근하므로 서비스 계정 권한도 제한해야 합니다.
+
+로컬 봇의 `.local/keybot/connection.json`에는 SERVER_URL과 같은 KEY_ADMIN_SECRET을 설정합니다. Discord 봇 토큰은 Render에 넣지 않습니다. 구버전 `KEY_AGENT_SECRET`, `KEY_DATABASE_URL`은 사용하지 않습니다.
+
+Render 임시 디스크에는 키 DB를 저장하지 않습니다. Discord 봇·Gateway도 Render에서 실행하지 않습니다. 로그 전송은 이벤트 발생 시 깨우고, 대기 중에는 60초 주기로 확인합니다. 실제 사용량에 따라 Firestore 할당량을 확인하세요. Firebase 설정 전에는 인증·새 실행이 차단됩니다.
+
+검증: `firebase emulators:exec --only firestore --project demo-padlet-key-tests "python -m pytest -q"`, `python tests/ui_smoke.py`. GitHub CI도 공식 Firestore 에뮬레이터에서 동시 차감·재접속 후 잔여 횟수·브라우저 직접 접근 차단을 확인합니다.

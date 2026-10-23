@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Dedicated license database: clients cannot read or write any documents.
+    // Render authenticates with its service account through IAM.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

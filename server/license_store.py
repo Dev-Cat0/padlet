@@ -1,4 +1,4 @@
-"""Server-owned license ledger; durable Postgres in production, SQLite in tests."""
+"""SQLite reference ledger for local tests; production uses FirestoreStore."""
 import calendar
 import json
 import hashlib
@@ -42,14 +42,7 @@ class Store:
         if len(pepper) < 32:
             raise ValueError("KEY_HASH_SECRET must contain at least 32 characters")
         self.path, self.pepper = str(path), pepper.encode()
-        self.pool = None
-        if self.path.startswith(('postgres://', 'postgresql://')):
-            from psycopg_pool import ConnectionPool
-            from psycopg.rows import dict_row
-            self.pool = ConnectionPool(self.path, min_size=0, max_size=3, timeout=5,
-                                       kwargs={'row_factory': dict_row, 'connect_timeout': 5}, open=True)
-        else:
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS grants (
@@ -78,12 +71,6 @@ class Store:
 
     @contextmanager
     def db(self):
-        if self.pool:
-            with self.pool.connection() as connection:
-                # All ledger transactions are short. Serialize them across web instances too.
-                connection.execute('SELECT pg_advisory_xact_lock(1562751204)')
-                yield PostgresAdapter(connection)
-            return
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
         try:
@@ -95,8 +82,7 @@ class Store:
             db.close()
 
     def close(self):
-        if self.pool:
-            self.pool.close()
+        pass
 
     def digest(self, key):
         return hmac.new(self.pepper, key.strip().upper().encode(), hashlib.sha256).hexdigest()
@@ -150,6 +136,14 @@ class Store:
             changed = db.execute("UPDATE licenses SET state='active' WHERE id=? AND state='pending'", (license_id,)).rowcount
             if changed:
                 self.license_event(db, 'issued', license_id)
+
+    def owner_for(self, license_id):
+        with self.db() as db:
+            row = db.execute('SELECT user_id FROM licenses WHERE id=?', (license_id,)).fetchone()
+            return row['user_id'] if row else None
+
+    def maintenance(self):
+        self.delivery_failed(older_than=time.time() - 600)
 
     def delivery_failed(self, license_id=None, user=None, *, older_than=None):
         # Also recover interrupted deliveries at startup. A sent-but-uncommitted DM key is revoked.
@@ -297,18 +291,3 @@ class Store:
             row = db.execute("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=?",
                              (str(guild), str(user))).fetchone()
             return row["channel_id"] if row else None
-
-
-class PostgresAdapter:
-    def __init__(self, connection):
-        self.connection = connection
-
-    def execute(self, sql, params=()):
-        return self.connection.execute(sql.replace('?', '%s'), params)
-
-    def executescript(self, script):
-        script = script.replace('id INTEGER PRIMARY KEY', 'id BIGSERIAL PRIMARY KEY').replace(' REAL', ' DOUBLE PRECISION')
-        script = script.replace('channel_id INTEGER', 'channel_id BIGINT').replace('grant_id INTEGER', 'grant_id BIGINT')
-        for statement in script.split(';'):
-            if statement.strip():
-                self.connection.execute(statement)

@@ -2,31 +2,42 @@
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import re
 import time
 from collections import deque
 
 from fastapi import HTTPException
-from .license_store import Store, LicenseError, RateLimited
+from .license_store import LicenseError, RateLimited
 
 
 class KeyAccess:
     def __init__(self):
         self.store = None
         self.attempts = deque(maxlen=600)
+        self.audit_signal = asyncio.Event()
 
     async def start(self):
+        self.audit_signal = asyncio.Event()
         if self.store is not None:
             return
-        database = os.getenv('KEY_DATABASE_URL', '')
         pepper = os.getenv('KEY_HASH_SECRET', '')
-        if not database or len(pepper) < 32:
+        project = os.getenv('FIREBASE_PROJECT_ID', '')
+        if not project or len(pepper) < 32:
             return  # Fail closed without taking down stop/delete endpoints.
-        if not database.startswith(('postgres://', 'postgresql://')):
-            if os.getenv('RENDER') or os.getenv('KEY_ALLOW_SQLITE_LOCAL') != '1':
-                raise RuntimeError('Production key storage requires durable Postgres')
-        self.store = await asyncio.to_thread(Store, database, pepper)
+        if os.getenv('RENDER') and os.getenv('FIRESTORE_EMULATOR_HOST'):
+            raise RuntimeError('Emulator credentials must never be used in production')
+        from google.cloud import firestore
+        from google.oauth2 import service_account
+        from .firestore_store import FirestoreStore
+        info = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
+        credentials = service_account.Credentials.from_service_account_info(json.loads(info)) if info else None
+        if credentials and credentials.project_id != project:
+            raise RuntimeError('Firebase project does not match its service account')
+        client = firestore.Client(project=project, credentials=credentials,
+                                  database=os.getenv('FIREBASE_DATABASE_ID', '(default)'))
+        self.store = FirestoreStore(client, pepper)
 
     def require_store(self):
         if self.store is None:
@@ -63,6 +74,8 @@ class KeyAccess:
             raise
         except Exception:
             raise HTTPException(503, '키 저장소에 연결할 수 없습니다. 잠시 후 다시 시도하세요.') from None
+        finally:
+            self.audit_signal.set()
 
     async def authenticate_admin(self, request):
         secret = os.getenv('KEY_ADMIN_SECRET', '')

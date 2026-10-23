@@ -1,0 +1,8 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    { "collectionGroup": "audit_events", "fieldPath": "payload", "indexes": [] },
+    { "collectionGroup": "outbox", "fieldPath": "payload", "indexes": [] },
+    { "collectionGroup": "settings", "fieldPath": "url", "indexes": [] }
+  ]
+}
