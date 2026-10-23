@@ -65,7 +65,8 @@ def send_event(url, event):
         logging.getLogger(__name__).warning('Discord audit HTTP %s (API code %s)', error.code, details.get('code', 'unknown'))
         if error.code == 429:
             try:
-                return False, min(3600, max(1, float(details['retry_after'])))
+                retry = float(details.get('retry_after') or error.headers.get('Retry-After', 60))
+                return False, max(1, retry) if math.isfinite(retry) else 60
             except (ValueError, KeyError, TypeError):
                 pass
         return False, 60
@@ -88,6 +89,10 @@ async def worker(access):
                     if event:
                         delivered, retry = await asyncio.to_thread(send_event, url, event)
                         await asyncio.to_thread(store.finish_event, event['id'], delivered, retry)
+                        if not delivered:
+                            # Incoming API activity must not bypass Discord's Retry-After.
+                            await asyncio.sleep(retry)
+                            continue
                         delay = .5 if delivered else retry
                 if time.monotonic() >= maintenance_at:
                     await asyncio.to_thread(store.maintenance)

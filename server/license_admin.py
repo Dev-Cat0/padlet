@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from typing import Literal
 
 from .license_store import LicenseError, OWNER_ID
-from .audit import LOG_CHANNEL_ID
+from .audit import LOG_CHANNEL_ID, event_message
 
 
 class AdminRequest(BaseModel):
@@ -21,6 +21,8 @@ class AdminRequest(BaseModel):
     grant_id: int | None = Field(default=None, gt=0)
     license_id: str = Field(default='', max_length=100)
     webhook: str = Field(default='', max_length=500)
+    event_id: str = Field(default='', max_length=100, pattern=r'^[A-Za-z0-9_-]*$')
+    delivered: bool = False
 
 
 def routes(access, sessions):
@@ -57,6 +59,14 @@ def routes(access, sessions):
                     raise LicenseError('본인의 문의만 조회할 수 있습니다.')
                 return {'channel': await asyncio.to_thread(store.ticket, data.guild, data.user, data.channel)}
             store.require_owner(data.actor)
+            if action == 'audit_next':
+                event = await asyncio.to_thread(store.next_event)
+                return {'event': {'id': str(event['id']), 'content': event_message(event)['content']} if event else None}
+            if action == 'audit_finish':
+                if not data.event_id:
+                    raise LicenseError('로그 기록 번호가 필요합니다.')
+                await asyncio.to_thread(store.finish_event, data.event_id, data.delivered, 60)
+                return {'ok': True}
             if action == 'revoke':
                 count = await asyncio.to_thread(store.revoke, data.actor, data.license_id)
                 for session in list(sessions.items.values()):

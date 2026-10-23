@@ -184,3 +184,20 @@ def test_audit_outbox_durable_and_human_readable(ledger):
     assert reloaded.next_event()['id'] == pending['id']
     ledger.finish_event(pending['id'], True)
     assert reloaded.next_event()['id'] != pending['id']
+
+
+def test_local_log_relay_requires_owner_and_shares_delivery_lease(ledger):
+    from server.app import app
+    key = issue(ledger)
+    with TestClient(app) as client:
+        assert client.post('/internal/licenses/audit_next', json={'actor': OWNER_ID}).status_code == 401
+        assert client.post(**signed('audit_next', {'actor': 222})).status_code == 403
+        response = client.post(**signed('audit_next', {'actor': OWNER_ID}))
+        assert response.status_code == 200 and key['key'] not in response.text
+        event = response.json()['event']
+        other = ledger.next_event()
+        assert str(other['id']) != event['id']
+        assert client.post(**signed('audit_finish', {'actor': 222, 'event_id': event['id'], 'delivered': True})).status_code == 403
+        assert client.post(**signed('audit_finish', {'actor': OWNER_ID, 'event_id': event['id'], 'delivered': True})).status_code == 200
+        with ledger.db() as db:
+            assert db.execute('SELECT sent FROM audit_events WHERE id=?', (event['id'],)).fetchone()[0] == 1

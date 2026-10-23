@@ -1,11 +1,13 @@
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import datetime
 
 import discord
 from discord import app_commands
 
 from .client import KST, OWNER_ID, LOG_CHANNEL_ID, LicenseError
+from .audit import relay_once
 
 
 def grant_label(grant):
@@ -110,6 +112,8 @@ class Bot(discord.Client):
         self.ticket_lock = asyncio.Lock()
         self.delivery_lock = asyncio.Lock()
         self.logs_configured = False
+        self.audit_task = None
+        self.audit_signal = asyncio.Event()
         self.register_commands()
 
     async def setup_hook(self):
@@ -126,6 +130,34 @@ class Bot(discord.Client):
                 await self.configure_logs()
             except Exception as error:
                 logging.getLogger(__name__).warning('로그 연결 실패 (%s). 지정 채널의 웹후크 관리 권한 확인 후 /로그설정', type(error).__name__)
+        if self.audit_task is None or self.audit_task.done():
+            self.audit_task = asyncio.create_task(self.audit_loop())
+
+    async def audit_loop(self):
+        while not self.is_closed():
+            self.audit_signal.clear()
+            try:
+                channel = self.get_channel(LOG_CHANNEL_ID) or await self.fetch_channel(LOG_CHANNEL_ID)
+                if not isinstance(channel, discord.TextChannel) or channel.guild.id != self.guild_id:
+                    raise LicenseError('설정된 로그 채널이 아닙니다.')
+                if await relay_once(self.store, channel):
+                    await asyncio.sleep(1)
+                    continue
+            except Exception as error:
+                logging.getLogger(__name__).warning('로그 재전송 대기 (%s)', type(error).__name__)
+                await asyncio.sleep(30)
+                continue
+            try:
+                await asyncio.wait_for(self.audit_signal.wait(), timeout=30)
+            except TimeoutError:
+                pass
+
+    async def close(self):
+        if self.audit_task:
+            self.audit_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.audit_task
+        await super().close()
 
     async def configure_logs(self):
         channel = self.get_channel(LOG_CHANNEL_ID) or await self.fetch_channel(LOG_CHANNEL_ID)
@@ -164,6 +196,8 @@ class Bot(discord.Client):
                     except Exception:
                         pass  # The server recovers unconfirmed deliveries after ten minutes.
                 await reply_error(interaction, error)
+            finally:
+                self.audit_signal.set()
 
     def register_commands(self):
         async def owner(interaction):
@@ -189,6 +223,7 @@ class Bot(discord.Client):
         async def grant(interaction, user, kind, amount, quantity):
             await interaction.response.defer(ephemeral=True)
             await asyncio.to_thread(self.store.grant, interaction.user.id, user.id, kind, amount, quantity)
+            self.audit_signal.set()
             await interaction.followup.send(f"{user.mention}에게 {grant_label({'kind': kind, 'amount': amount})} 키 발급권 {quantity}개 지급 완료.", ephemeral=True)
 
         @self.tree.command(name="다회용티켓지급", description="관리자: 실행 횟수가 정해진 키 발급권 지급")
