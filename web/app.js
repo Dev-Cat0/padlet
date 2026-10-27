@@ -81,8 +81,9 @@ function render(next) {
     (next.delete_untracked?' · 추적 불가 '+next.delete_untracked+'건':'')+
     (next.delete_errors?' · 삭제 오류 '+next.delete_errors+'건':'')+
     (next.delete_retry_after?' · '+next.delete_retry_after+'초 후 재시도':'');
-  for(const id of ['url','subject','body','limit','delay','commentsEnabled']) $(id).disabled=active||submitting;
+  for(const id of ['url','subject','body','limit','delay','commentsEnabled','passwordEnabled']) $(id).disabled=active||submitting;
   renderComments(active||submitting);
+  renderPassword(active||submitting);
   $('sent').textContent=next.sent;
   $('commentsSent').textContent=next.comments_sent||0;
   $('commentStatus').textContent='댓글 대상 '+(next.comments_targets||0)+'개 게시글 · 댓글 오류 '+(next.comments_errors||0)+'건';
@@ -123,6 +124,18 @@ async function connect(){
     $('authGate').hidden=true;$('panel').inert=false;notice();render(next);poll(current);
   }catch(error){notice(message(error));if(error.status===401){beginAuth();return;}authMessage(message(error));timer=setTimeout(connect,3000);}
 }
+function renderPassword(busy=false) {
+  const enabled=$('passwordEnabled').checked;
+  $('passwordSettings').hidden=!enabled;
+  $('boardPassword').disabled=busy||!enabled;
+  $('boardPassword').required=enabled;
+}
+$('passwordEnabled').onchange=()=>{
+  if(!$('passwordEnabled').checked) $('boardPassword').value='';
+  renderPassword();
+  if($('passwordEnabled').checked) $('boardPassword').focus();
+};
+renderPassword();
 function renderComments(busy=false) {
   const enabled=$('commentsEnabled').checked;
   $('commentSettings').hidden=!enabled;
@@ -137,10 +150,11 @@ $('sendForm').onsubmit=async event=>{
   try{
     const data={url:$('url').value.trim(),subject:$('subject').value,body:$('body').value,limit:Number($('limit').value),delay:Number($('delay').value)};
     if($('commentsEnabled').checked) data.comments={enabled:true,body:$('commentBody').value,count:Number($('commentCount').value),delay:Number($('commentDelay').value)};
+    if($('passwordEnabled').checked) data.password=$('boardPassword').value;
     render(await api('/api/run',data, {'X-Request-ID':crypto.randomUUID()}));
   }
   catch(error){notice(message(error));try{render(await api('/api/state'));}catch(_){connected=false;}}
-  finally{submitting=false;if(state)render(state);}
+  finally{$('boardPassword').value='';submitting=false;if(state)render(state);}
 };
 $('stop').onclick=async()=>{ $('stop').disabled=true;try{render(await api('/api/stop',{}));}catch(error){notice(message(error));if(state)render(state);}};
 $('emergencyDelete').onclick=async()=>{

@@ -59,7 +59,15 @@ def main():
         page.locator('#keySubmit').click()
         page.wait_for_function("() => !document.getElementById('start').disabled")
         assert page.locator('#authGate').is_hidden()
-        assert page.locator("#sendForm input,#sendForm textarea").count()==9
+        assert page.locator("#sendForm input,#sendForm textarea").count()==11
+        assert page.locator('#passwordSettings').is_hidden()
+        assert page.locator('#boardPassword').is_disabled()
+        page.locator('#passwordEnabled').check()
+        assert page.locator('#passwordSettings').is_visible()
+        assert not page.locator('#boardPassword').evaluate('el => el.checkValidity()')
+        page.locator('#boardPassword').fill('must-clear')
+        page.locator('#passwordEnabled').uncheck()
+        assert page.locator('#boardPassword').input_value() == ''
         assert page.locator('#commentSettings').is_hidden()
         assert page.locator('#commentBody').is_disabled()
         count = page.locator('#limit')
@@ -85,10 +93,14 @@ def main():
         page.locator('#commentBody').fill('Comment text')
         page.locator('#commentCount').fill('2')
         page.locator('#commentDelay').fill('0')
+        page.locator('#passwordEnabled').check()
+        page.locator('#boardPassword').fill('board-password-fixture')
         page.locator("#start").click()
         page.wait_for_function("() => !document.getElementById('stop').disabled")
         assert calls==[{"url":"https://padlet.com/example/board","subject":"Test title","body":"Test body","limit":3,"delay":.5,
-                       "comments":{"enabled":True,"body":"Comment text","count":2,"delay":0}}]
+                       "comments":{"enabled":True,"body":"Comment text","count":2,"delay":0},"password":"board-password-fixture"}]
+        assert page.locator('#boardPassword').input_value() == ''
+        assert page.locator('#passwordEnabled').is_disabled()
         assert page.locator('#commentsEnabled').is_disabled()
         assert page.locator('#commentCount').is_disabled()
         assert page.locator("#start").is_disabled()
