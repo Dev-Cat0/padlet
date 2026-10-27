@@ -4,7 +4,7 @@ const base = 'https://padlet-sender-panel.onrender.com';
 let token = '', connected = false, state = null, submitting = false, timer = null, lastLog = 0, generation = 0;
 let authGeneration = 0, authenticating = false;
 try { token = sessionStorage.getItem('padlet-session') || ''; } catch (_) {}
-const phases = {waiting:'시작 대기',preparing:'봇 익명 세션 준비 중',opening:'준비 중',sending:'전송 중',backoff:'요청 제한 · 대기 중',stopping:'중지 중',stopped:'중지됨',finished:'전송 완료',error:'오류로 중단',ready:'준비 완료',capturing:'이전 작업이 남아 있습니다. 새로 실행하면 교체됩니다.'};
+const phases = {waiting:'시작 대기',preparing:'봇 익명 세션 준비 중',opening:'준비 중',sending:'게시글 전송 중',commenting:'댓글 작성 중',backoff:'요청 제한 · 대기 중',stopping:'중지 중',stopped:'중지됨',finished:'전송 완료',error:'오류로 중단',ready:'준비 완료',capturing:'이전 작업이 남아 있습니다. 새로 실행하면 교체됩니다.'};
 Object.assign(phases,{deleting:'긴급 삭제 중 · 전송 중지 및 게시물 삭제',deleted:'긴급 삭제 완료',delete_incomplete:'긴급 삭제 미완료 · 남은 항목 확인'});
 function notice(text='') { $('notice').textContent=text; $('notice').hidden=!text; }
 async function api(path, data, extraHeaders={}, authToken=token) {
@@ -81,13 +81,19 @@ function render(next) {
     (next.delete_untracked?' · 추적 불가 '+next.delete_untracked+'건':'')+
     (next.delete_errors?' · 삭제 오류 '+next.delete_errors+'건':'')+
     (next.delete_retry_after?' · '+next.delete_retry_after+'초 후 재시도':'');
-  for(const id of ['url','subject','body','limit','delay']) $(id).disabled=active||submitting;
+  for(const id of ['url','subject','body','limit','delay','commentsEnabled']) $(id).disabled=active||submitting;
+  renderComments(active||submitting);
   $('sent').textContent=next.sent;
+  $('commentsSent').textContent=next.comments_sent||0;
+  $('commentStatus').textContent='댓글 대상 '+(next.comments_targets||0)+'개 게시글 · 댓글 오류 '+(next.comments_errors||0)+'건';
   $('errors').textContent=next.errors;
   $('phase').textContent=phases[next.phase]||next.phase;
-  const total=next.limit*(next.target_count||1);
-  $('progress').value=total>0?Math.min(100,next.sent/total*100):0;
-  $('board').textContent=next.board ? next.board.title+(next.board.sections?.length?' · 전체 '+next.board.sections.length+'개 섹션':'')+(total>0?' · 총 '+total+'건 예정':''):'';
+  const commentsOnly=next.execution_mode==='comments';
+  const total=commentsOnly?(next.comments_total||0):next.limit*(next.target_count||1);
+  $('progress').setAttribute('aria-label',commentsOnly?'댓글 작성 진행률':'게시글 전송 진행률');
+  $('progress').value=total>0?Math.min(100,(commentsOnly?next.comments_sent:next.sent)/total*100):0;
+  const mode={both:'게시글 + 댓글',posts:'게시글만',comments:'댓글만',none:'작성 권한 없음'}[next.execution_mode];
+  $('board').textContent=next.board ? next.board.title+(mode?' · '+mode:'')+(next.board.sections?.length?' · 전체 '+next.board.sections.length+'개 섹션':'')+(total>0?' · '+(commentsOnly?'댓글 ':'총 ')+total+'건 예정':''):'';
   const logs=next.logs||[];
   if(logs.length&&logs.at(-1).id<lastLog){lastLog=0;$('log').replaceChildren();}
   for(const row of logs.filter(row=>row.id>lastLog)) {
@@ -113,10 +119,22 @@ async function connect(){
     $('authGate').hidden=true;$('panel').inert=false;notice();render(next);poll(current);
   }catch(error){notice(message(error));if(error.status===401){beginAuth();return;}authMessage(message(error));timer=setTimeout(connect,3000);}
 }
+function renderComments(busy=false) {
+  const enabled=$('commentsEnabled').checked;
+  $('commentSettings').hidden=!enabled;
+  for(const id of ['commentBody','commentCount','commentDelay']) $(id).disabled=busy||!enabled;
+  $('commentBody').required=enabled;
+}
+$('commentsEnabled').onchange=()=>renderComments();
+renderComments();
 $('sendForm').onsubmit=async event=>{
   event.preventDefault();if(!connected||submitting||state?.running||state?.opening||state?.deleting||accessBlocked(state?.access))return;
   submitting=true;notice();if(state)render(state);
-  try{render(await api('/api/run',{url:$('url').value.trim(),subject:$('subject').value,body:$('body').value,limit:Number($('limit').value),delay:Number($('delay').value)}, {'X-Request-ID':crypto.randomUUID()}));}
+  try{
+    const data={url:$('url').value.trim(),subject:$('subject').value,body:$('body').value,limit:Number($('limit').value),delay:Number($('delay').value)};
+    if($('commentsEnabled').checked) data.comments={enabled:true,body:$('commentBody').value,count:Number($('commentCount').value),delay:Number($('commentDelay').value)};
+    render(await api('/api/run',data, {'X-Request-ID':crypto.randomUUID()}));
+  }
   catch(error){notice(message(error));try{render(await api('/api/state'));}catch(_){connected=false;}}
   finally{submitting=false;if(state)render(state);}
 };

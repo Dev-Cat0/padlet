@@ -6,6 +6,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 
 def main():
+    (ROOT/'.local').mkdir(exist_ok=True)
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=True)
         page=browser.new_page(viewport={"width":1366,"height":1000})
@@ -58,7 +59,9 @@ def main():
         page.locator('#keySubmit').click()
         page.wait_for_function("() => !document.getElementById('start').disabled")
         assert page.locator('#authGate').is_hidden()
-        assert page.locator("#sendForm input,#sendForm textarea").count()==5
+        assert page.locator("#sendForm input,#sendForm textarea").count()==9
+        assert page.locator('#commentSettings').is_hidden()
+        assert page.locator('#commentBody').is_disabled()
         count = page.locator('#limit')
         for value, valid in [('0', True), ('5000', True), ('5001', False)]:
             count.fill(value)
@@ -76,9 +79,18 @@ def main():
         page.locator("#body").fill("Test body")
         page.locator("#limit").fill("3")
         page.locator("#delay").fill("0.5")
+        page.locator('#commentsEnabled').check()
+        assert page.locator('#commentSettings').is_visible()
+        assert not page.locator('#commentBody').evaluate('el => el.checkValidity()')
+        page.locator('#commentBody').fill('Comment text')
+        page.locator('#commentCount').fill('2')
+        page.locator('#commentDelay').fill('0')
         page.locator("#start").click()
         page.wait_for_function("() => !document.getElementById('stop').disabled")
-        assert calls==[{"url":"https://padlet.com/example/board","subject":"Test title","body":"Test body","limit":3,"delay":.5}]
+        assert calls==[{"url":"https://padlet.com/example/board","subject":"Test title","body":"Test body","limit":3,"delay":.5,
+                       "comments":{"enabled":True,"body":"Comment text","count":2,"delay":0}}]
+        assert page.locator('#commentsEnabled').is_disabled()
+        assert page.locator('#commentCount').is_disabled()
         assert page.locator("#start").is_disabled()
         assert "준비" in page.locator("#phase").inner_text()
         page.locator("#stop").click()
@@ -94,10 +106,19 @@ def main():
         assert len(calls) == 1
         page.evaluate("""() => render({ready:false,running:false,opening:false,phase:'finished',
             board:{title:'Fixture',sections:[{id:1},{id:2},{id:3}]},target_count:3,
-            sent:3,errors:0,limit:3,rounds:1,logs:[]})""")
+            sent:3,comments_sent:6,comments_targets:3,comments_errors:1,errors:1,limit:3,rounds:1,logs:[]})""")
+        assert page.locator('#commentsSent').inner_text() == '6'
+        assert '대상 3개 게시글' in page.locator('#commentStatus').inner_text()
+        assert '댓글 오류 1건' in page.locator('#commentStatus').inner_text()
         assert abs(page.locator("#progress").evaluate("(el) => el.value") - 100 / 3) < .01
         assert "전체 3개 섹션" in page.locator("#board").inner_text()
         assert "총 9건 예정" in page.locator("#board").inner_text()
+        page.evaluate("""() => render({ready:false,running:true,opening:false,phase:'commenting',
+            execution_mode:'comments',comments_total:4,comments_sent:2,
+            board:{title:'Fixture',sections:[]},sent:0,errors:0,limit:50,logs:[]})""")
+        assert page.locator('#progress').evaluate('el => el.value') == 50
+        assert '댓글만' in page.locator('#board').inner_text()
+        assert '댓글 4건 예정' in page.locator('#board').inner_text()
         assert "섹션당 게시물 개수" in page.locator("label", has=page.locator("#limit")).inner_text()
         state.update(delete_pending=3)
         page.evaluate("s => render(s)", state)
@@ -127,7 +148,18 @@ def main():
         assert page.locator('#accessKey').input_value() == ''
         assert all('A1B2C' not in body for url,body in requests if '/api/auth/login' not in url)
         assert page.evaluate("JSON.stringify({...sessionStorage, ...localStorage})") == '{"padlet-session":"fixture"}'
-        print(json.dumps({"one_use_stays_disabled_after_stop_and_reload":True,"expiry_disables_button":True,"five_fields":True,"one_click_run":True,"stop_during_prepare":True,
+        state['access'].update(remaining=1, expires=None, can_run=True)
+        state.update(phase='waiting', comments_sent=0, comments_targets=0)
+        page.evaluate('s => render(s)', state)
+        page.locator('#commentsEnabled').check()
+        page.locator('#commentBody').fill('댓글 내용 예시')
+        page.locator('#commentCount').fill('2')
+        page.locator('#commentDelay').fill('0')
+        assert page.evaluate('document.documentElement.scrollWidth') <= 390
+        page.screenshot(path=str(ROOT/'.local/comments-mobile.png'), full_page=True)
+        page.set_viewport_size({'width':1366,'height':1000})
+        page.screenshot(path=str(ROOT/'.local/comments-desktop.png'), full_page=True)
+        print(json.dumps({"one_use_stays_disabled_after_stop_and_reload":True,"expiry_disables_button":True,"comment_controls":True,"one_click_run":True,"stop_during_prepare":True,
                          "emergency_delete_and_retry":True,"backend_key_login":True,"key_not_stored":True,"real_posts":0,"real_deletions":0}))
         browser.close()
 if __name__=="__main__":main()
