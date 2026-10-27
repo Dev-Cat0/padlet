@@ -20,12 +20,13 @@ async def main():
         ("correct", PASSWORD, True), ("forbidden_gate", PASSWORD, True),
         ("wrong", "wrong-secret", False), ("missing", None, False),
         ("login", PASSWORD, False), ("external", PASSWORD, False),
-        ("challenge", PASSWORD, False)]:
+        ("challenge", PASSWORD, False), ("get_form", PASSWORD, False)]:
         attempts = []
         def gate():
             action = "https://evil.example/collect" if mode == "external" else URL
             email = '<input type="email">' if mode == "login" else ''
-            return '<html><body><form method="post" action="'+action+'">'+email+'<input name="password" type="password"><button type="submit">Go</button></form></body></html>'
+            method = 'get' if mode == 'get_form' else 'post'
+            return '<html><body><form method="'+method+'" action="'+action+'">'+email+'<input name="password" type="password"><button type="submit">Go</button></form></body></html>'
         async def route(self, route):
             request = route.request
             assert urlsplit(request.url).hostname == "padlet.com"
@@ -57,6 +58,7 @@ async def main():
                     success = False
                     assert PASSWORD not in str(error) and "wrong-secret" not in str(error)
                 assert success == expected, mode
+                assert PASSWORD not in browser.page.url
                 if expected:
                     light = await browser.sending_page()
                     transport = BrowserHTTP(light, "https://padlet.com/api/9/wishes")

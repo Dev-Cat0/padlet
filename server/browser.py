@@ -231,6 +231,12 @@ class BrowserSession:
             target, board = urlsplit(action), urlsplit(board_url)
             if (target.scheme, target.netloc) != (board.scheme, board.netloc) or target.path.startswith(("/auth/", "/login")):
                 raise ValueError("게시판 비밀번호 제출 주소를 확인하지 못했습니다.")
+        # JS forms often omit method; keep their handlers but prohibit native GET
+        # submission so a password can never enter a URL or access log.
+        await field.evaluate("""el => {
+            if (el.form && el.form.method.toLowerCase() !== 'post')
+                el.form.addEventListener('submit', event => event.preventDefault(), {capture:true, once:true});
+        }""")
         self.sender.log("게시판 비밀번호를 확인합니다.")
         await field.fill(password)
         password = None
