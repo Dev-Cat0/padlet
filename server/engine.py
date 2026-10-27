@@ -124,7 +124,7 @@ class Sender:
             await self.http.close()
             self.http = None
 
-    async def queue_run(self, url, subject, body, limit, delay, before_start=None, comments=None):
+    async def queue_run(self, url, subject, body, limit, delay, before_start=None, comments=None, password=None):
         """Accept one job promptly; all preparation happens in a fresh bot context."""
         url = padlet_url(url)
         options = CommentOptions.model_validate(comments or {})
@@ -143,10 +143,10 @@ class Sender:
             self.automatic, self.opening, self.phase = True, True, "preparing"
             self.ready = False
             self.log("작업 접수 · 봇 전용 익명 세션을 준비합니다.")
-            self.worker = asyncio.create_task(self.automatic_run(url, subject, body, limit, delay))
+            self.worker = asyncio.create_task(self.automatic_run(url, subject, body, limit, delay, password))
         await asyncio.sleep(0)  # Enter the task's cleanup scope before it can be stopped.
 
-    async def automatic_run(self, url, subject, body, limit, delay):
+    async def automatic_run(self, url, subject, body, limit, delay, password=None):
         stage = "브라우저 시작·게시판 접속"
         comment_task = None
         try:
@@ -154,7 +154,14 @@ class Sender:
             self.browser = BrowserSession(self)
             self.browser.capture_enabled = False
             async with asyncio.timeout(75):
-                await self.browser.open(url)
+                try:
+                    if password is None:
+                        await self.browser.open(url)
+                    else:
+                        stage = "게시판 비밀번호 확인"
+                        await self.browser.open(url, password=password)
+                finally:
+                    password = None
                 stage = "경량 페이지 준비"
                 page = await self.browser.sending_page()
                 self.log("경량 전송 준비 · 게시판 화면과 실시간 갱신을 종료했습니다.")

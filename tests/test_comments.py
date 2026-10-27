@@ -414,13 +414,17 @@ def test_post_preparation_failure_does_not_prevent_comments(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_repeated_comment_rate_limits_do_not_stop_posts(monkeypatch):
+def test_repeated_comment_rate_limits_eventually_resume_without_stopping_posts(monkeypatch):
     async def scenario():
         http, posts, comments, *_ = fixture(monkeypatch)
         original = http.post.side_effect
+        attempts = 0
         async def post(url, **kwargs):
+            nonlocal attempts
             if url.endswith("/comments"):
-                return response(429, headers={"Retry-After": "1"})
+                attempts += 1
+                if attempts <= 8:
+                    return response(429, headers={"Retry-After": "1"})
             return await original(url, **kwargs)
         http.post.side_effect = post
         sender = Sender()
@@ -428,8 +432,25 @@ def test_repeated_comment_rate_limits_do_not_stop_posts(monkeypatch):
         await sender.queue_run(URL, "title", "", 3, 0,
                                comments={"enabled": True, "body": "text", "delay": 0})
         await sender.worker
-        assert len(posts) == 3 and sender.commenter.failed and not sender.stop_event.is_set()
-        assert sum(c.args[0].endswith("/comments") for c in http.post.await_args_list) == 6
+        assert len(posts) == 3 and not sender.commenter.failed and not sender.stop_event.is_set()
+        assert len(comments) == 4 and attempts == 12 and sender.phase == "finished"
+    asyncio.run(scenario())
+
+
+def test_stop_interrupts_repeated_rate_limit_wait():
+    async def scenario():
+        sender, commenter = make_commenter()
+        blocked = asyncio.Event()
+        async def post(*args, **kwargs):
+            blocked.set()
+            return response(429, headers={"Retry-After": "3600"})
+        sender.http.post.side_effect = post
+        task = asyncio.create_task(deliver(commenter, 7))
+        await blocked.wait()
+        sender.stop()
+        await asyncio.wait_for(task, 1)
+        assert sender.comments_sent == 0 and sender.http.post.await_count == 1
+        assert commenter.phase == "stopped"
     asyncio.run(scenario())
 
 
@@ -450,4 +471,17 @@ def test_deleted_post_is_skipped_without_losing_other_targets():
         await commenter.run()
         assert ids == [7, 8, 9, 8, 9] and sender.comments_sent == 4
         assert not commenter.failed and not sender.stop_event.is_set()
+    asyncio.run(scenario())
+
+
+def test_comment_retry_after_http_date_is_respected(monkeypatch):
+    from email.utils import formatdate
+    async def scenario():
+        sender, commenter = make_commenter(count=1)
+        sender.http.post.side_effect = [response(429, headers={"Retry-After": formatdate(time.time()+120, usegmt=True)}),
+            response(201, {"data": {"attributes": {"id": 50, "wish_id": 7}}})]
+        sender.wait = AsyncMock(return_value=False)
+        await deliver(commenter, 7)
+        assert 118 < sender.wait.await_args.args[0] <= 120
+        assert sender.comments_sent == 1
     asyncio.run(scenario())

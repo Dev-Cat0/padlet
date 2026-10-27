@@ -4,6 +4,7 @@ import html
 import math
 import time
 from collections import deque
+from email.utils import parsedate_to_datetime
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -196,14 +197,15 @@ class CommentSender:
             challenge = response.headers.get("cf-mitigated") == "challenge"
             if response.status_code == 429 and not challenge:
                 retries += 1
-                if retries > 5:
-                    self.fail("댓글 요청 제한이 반복되어 댓글만 중단했습니다. 게시글 작업은 계속됩니다.")
-                    return False
+                fallback = min(300, 30 * 2 ** min(retries - 1, 4))
                 try:
-                    delay = float(response.headers.get("Retry-After") or 30)
-                    delay = max(1, delay) if math.isfinite(delay) else 30
+                    delay = float(response.headers.get("Retry-After") or fallback)
+                    delay = max(1, delay) if math.isfinite(delay) else fallback
                 except (ValueError, TypeError):
-                    delay = 30
+                    try:
+                        delay = max(1, parsedate_to_datetime(response.headers["Retry-After"]).timestamp() - time.time())
+                    except (KeyError, ValueError, TypeError, OverflowError):
+                        delay = fallback
                 self.backoff_until = time.monotonic() + delay
                 self.phase = "backoff"
                 self.sender.log(f"댓글 요청 제한 · 댓글만 {delay:g}초 대기", "warning")

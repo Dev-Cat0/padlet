@@ -27,3 +27,4 @@ jobs:
       - run: python tests/browser_smoke.py
       - run: python tests/ui_smoke.py
       - run: python tests/automatic_smoke.py
+      - run: python tests/password_smoke.py

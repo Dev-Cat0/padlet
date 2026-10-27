@@ -38,7 +38,14 @@ class Sessions:
     async def run(self, sender, data, before_start=None, request_id=None):
         async with self.browser_lock:
             session = self.for_sender(sender)
-            fingerprint = hashlib.sha256(data.model_dump_json().encode()).hexdigest() if request_id else ""
+            fingerprint = ""
+            if request_id:
+                content = data.model_dump_json()
+                password = getattr(data, "password", None)
+                if password is not None:
+                    content += "\0" + password.get_secret_value()
+                fingerprint = hashlib.sha256(content.encode()).hexdigest()
+                content = password = None
             if request_id and request_id in session.accepted:
                 if session.accepted[request_id] != fingerprint:
                     raise HTTPException(409, "같은 실행 번호에 다른 내용을 사용할 수 없습니다.")
@@ -53,6 +60,8 @@ class Sessions:
                 options["before_start"] = before_start
             if getattr(data, "comments", None) is not None:
                 options["comments"] = data.comments
+            if getattr(data, "password", None) is not None:
+                options["password"] = data.password.get_secret_value()
             await sender.queue_run(data.url, data.subject, data.body, data.limit, data.delay, **options)
             if request_id:
                 session.accepted[request_id] = fingerprint

@@ -196,3 +196,44 @@ def test_run_api_uses_discord_session_and_five_fields(monkeypatch, licensed_sess
         assert sender.queue_run.await_args.args == (URL,"Title","Body",3,.5)
         assert callable(sender.queue_run.await_args.kwargs["before_start"])
         assert client.post("/api/run",headers={"Authorization":"Bearer "+token},json={**data,"limit":-1}).status_code == 422
+
+
+def test_password_is_passed_only_to_browser_and_never_status(monkeypatch):
+    from test_comments import fixture
+    async def scenario():
+        http, posts, comments, *_ = fixture(monkeypatch)
+        original = __import__('server.engine', fromlist=['BrowserSession']).BrowserSession
+        seen = []
+        class PasswordBrowser(original):
+            async def open(self, url, password=None):
+                seen.append(password)
+        monkeypatch.setattr('server.engine.BrowserSession', PasswordBrowser)
+        sender = Sender()
+        await sender.queue_run(URL, 'Title', '', 1, 0, password='private-board-password')
+        await sender.worker
+        assert seen == ['private-board-password'] and len(posts) == 1
+        assert 'private-board-password' not in str(sender.status())
+        assert 'password' not in vars(sender)
+    asyncio.run(scenario())
+
+
+def test_password_api_redacts_validation_and_distinguishes_replayed_passwords(monkeypatch, licensed_session):
+    from server.app import RunRequest
+    assert 'secret-board' not in repr(RunRequest(url=URL,password='secret-board'))
+    with TestClient(app) as client:
+        token = licensed_session()
+        sender = sessions.items[token].sender
+        sender.queue_run = AsyncMock()
+        headers={'Authorization':'Bearer '+token, 'X-Request-ID':'password-request-0001'}
+        data={'url':URL, 'subject':'Title', 'password':'secret-board'}
+        result=client.post('/api/run', headers=headers, json=data)
+        assert result.status_code == 200
+        assert sender.queue_run.await_args.kwargs['password'] == 'secret-board'
+        assert 'secret-board' not in result.text
+        assert client.post('/api/run', headers=headers, json=data).status_code == 200
+        assert sender.queue_run.await_count == 1
+        assert client.post('/api/run', headers=headers, json={**data, 'password':'different'}).status_code == 409
+        for password in ['', 'sensitive-'*200, {'secret':'private-password'}]:
+            result=client.post('/api/run', headers=headers, json={**data, 'password':password})
+            assert result.status_code == 422
+            assert 'sensitive-' not in result.text and 'private-password' not in result.text

@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import SecretStr, BaseModel, Field
 
 from .engine import Sender
 from .sessions import Sessions
@@ -89,6 +89,11 @@ async def login(data: LoginRequest, request: Request, origin: str = Header(defau
 async def validation_error(request: Request, error):
     if request.url.path == "/api/auth/login" or request.url.path.startswith('/internal/'):
         return JSONResponse(status_code=422, content={"detail": "5자리 영문·숫자 키를 입력하세요."})
+    if request.url.path == "/api/run":
+        # Validation errors must never echo the supplied board password.
+        return JSONResponse(status_code=422, content={"detail": [
+            {"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
+            for item in error.errors()]})
     return await request_validation_exception_handler(request, error)
 
 
@@ -190,13 +195,14 @@ class RunRequest(BaseModel):
     limit: int = Field(default=50, ge=0, le=1000000)
     delay: float = Field(default=0.3, ge=0, le=86400, allow_inf_nan=False)
     comments: CommentOptions = Field(default_factory=CommentOptions)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
 
 
 @app.get("/")
 @app.get("/healthz")
 async def health():
     return {"status": "ok", "app": "padlet-sender", "key_auth": "server-v2",
-            "features": {"anonymous_comments": True, "permission_fallback": True, "independent_comment_worker": True, "round_robin_comments": True}}
+            "features": {"anonymous_comments": True, "permission_fallback": True, "independent_comment_worker": True, "round_robin_comments": True, "password_boards": True, "comment_rate_limit_resume": True}}
 
 
 @app.get("/api/state")

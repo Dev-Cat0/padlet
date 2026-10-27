@@ -178,7 +178,7 @@ class BrowserSession:
         self.context.on("page", self.select_page)
         self.context.on("response", self.observe)
 
-    async def open(self, url):
+    async def open(self, url, password=None):
         await self.initialize()
         self.page = await self.context.new_page()
         # Deferred app bundles can stall DOMContentLoaded after the inline guest
@@ -189,19 +189,69 @@ class BrowserSession:
                 wait_until="domcontentloaded" if self.capture_enabled else "commit", timeout=40000)
         except BrowserTimeoutError:
             raise ValueError("게시판 접속 시간이 초과되었습니다 (40초). 서버에서 Padlet 페이지를 불러오지 못했습니다.") from None
-        if response and (response.status in {401, 403} or response.headers.get("cf-mitigated") == "challenge"):
-            raise ValueError("Padlet이 익명 봇의 접속을 거부하거나 보안 확인을 요구합니다. 자동 전송을 중단했습니다.")
-        if response and response.status >= 400:
+        if response and response.headers.get("cf-mitigated") == "challenge":
+            raise ValueError("Padlet이 보안 확인을 요구합니다. 자동 전송을 중단했습니다.")
+        if response and response.status in {401, 403} and password is None:
+            raise ValueError("Padlet이 접속을 거부했습니다. 게시판 비밀번호 또는 보안 확인이 필요합니다.")
+        if response and response.status >= 400 and not (password is not None and response.status in {401, 403}):
             raise ValueError(f"게시판 페이지 조회 실패 (HTTP {response.status}). 게시판 주소와 접근 권한을 확인하세요.")
         padlet_url(self.page.url)
+        if password is not None:
+            try:
+                await self.unlock(password)
+            finally:
+                password = None
         if not self.capture_enabled:
             try:
                 handle = await self.page.wait_for_function("""() => Boolean(
-                    document.querySelector('meta[name="csrf-token"]')?.content && window.ww?.uid
+                    document.querySelector('meta[name="csrf-token"]')?.content && window.ww?.uid ||
+                    [...document.querySelectorAll('input[type="password"]')].some(el => el.getClientRects().length)
                 )""", timeout=15000)
                 await handle.dispose()
+                if await self.page.locator('input[type="password"]:visible').count():
+                    raise ValueError("비밀번호가 필요한 게시판입니다. 비밀번호 게시판 옵션을 켜고 입력하세요.")
             except BrowserTimeoutError:
                 raise ValueError("익명 세션 정보를 확인하지 못했습니다 (15초). 로그인·보안 확인이 필요하거나 페이지 로딩이 지연되고 있습니다.") from None
+
+    async def unlock(self, password):
+        """Submit the board's own password form once, preserving guest cookies."""
+        field = self.page.locator('input[type="password"]:visible')
+        try:
+            await field.first.wait_for(state="visible", timeout=12000)
+        except BrowserTimeoutError:
+            # The option can be left on for a board that is already accessible.
+            if await self.page.evaluate("() => Boolean(document.querySelector('meta[name=\"csrf-token\"]')?.content && window.ww?.uid)"):
+                return
+            raise ValueError("게시판 비밀번호 입력 화면을 확인하지 못했습니다.") from None
+        board_url = padlet_url(self.page.url)
+        if await field.count() != 1 or await self.page.locator('input[type="email"]:visible, input[autocomplete="username"]:visible').count():
+            raise ValueError("게시판 비밀번호 화면이 아닌 계정 로그인 화면에서는 인증하지 않습니다.")
+        action = await field.evaluate("el => el.form ? el.form.action : null")
+        if action:
+            target, board = urlsplit(action), urlsplit(board_url)
+            if (target.scheme, target.netloc) != (board.scheme, board.netloc) or target.path.startswith(("/auth/", "/login")):
+                raise ValueError("게시판 비밀번호 제출 주소를 확인하지 못했습니다.")
+        self.sender.log("게시판 비밀번호를 확인합니다.")
+        await field.fill(password)
+        password = None
+        if action:
+            await field.press("Enter")
+        else:
+            button = self.page.get_by_role("button", name=re.compile(r"^(Go|Submit|Continue|이동|입장|들어가기|확인|계속|제출)$", re.I))
+            if await button.count() != 1:
+                await field.fill("")
+                raise ValueError("게시판 비밀번호 확인 버튼을 찾지 못했습니다.")
+            await button.click()
+        try:
+            handle = await self.page.wait_for_function("""() => Boolean(
+                document.querySelector('meta[name="csrf-token"]')?.content && window.ww?.uid &&
+                ![...document.querySelectorAll('input[type="password"]')].some(el => el.getClientRects().length)
+            )""", timeout=15000)
+            await handle.dispose()
+        except BrowserTimeoutError:
+            raise ValueError("비밀번호가 틀렸거나 게시판 접근이 허용되지 않았습니다. 비밀번호를 확인하세요.") from None
+        padlet_url(self.page.url)
+        self.sender.log("게시판 비밀번호 확인 완료", "success")
 
     async def snapshot(self):
         page = self.active_page()
