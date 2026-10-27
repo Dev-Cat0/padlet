@@ -195,6 +195,12 @@ def make_commenter(count=2, delay=0):
     return sender, commenter
 
 
+async def deliver(commenter, identity):
+    commenter.enqueue(identity)
+    commenter.finish()
+    await commenter.run()
+
+
 def test_429_retries_only_rejected_comment_and_respects_wait():
     async def scenario():
         sender, commenter = make_commenter()
@@ -202,7 +208,7 @@ def test_429_retries_only_rejected_comment_and_respects_wait():
             response(201, {"data": {"attributes": {"id": 50, "wish_id": 7}}}),
             response(201, {"data": {"attributes": {"id": 51, "wish_id": 7}}})]
         sender.wait = AsyncMock(return_value=False)
-        await commenter.send(7)
+        await deliver(commenter, 7)
         assert sender.http.post.await_count == 3 and sender.comments_sent == 2
         assert 1.5 < sender.wait.await_args.args[0] <= 2
         assert sender.comments_errors == 0
@@ -214,9 +220,9 @@ def test_uncertain_or_denied_comments_stop_without_resend(failure):
     async def scenario():
         sender, commenter = make_commenter()
         sender.http.post.side_effect = [failure]
-        await commenter.send(7)
+        await deliver(commenter, 7)
         assert sender.http.post.await_count == 1 and commenter.failed
-        assert sender.stop_event.is_set() and sender.comments_sent == 0
+        assert not sender.stop_event.is_set() and sender.comments_sent == 0
         assert "private-token" not in json.dumps(sender.status())
     asyncio.run(scenario())
 
@@ -229,7 +235,7 @@ def test_comment_interval_and_stop_interrupt_wait():
             times.append(time.monotonic())
             return response(201, {"data": {"attributes": {"id": len(times), "wish_id": 7}}})
         sender.http.post.side_effect = post
-        await commenter.send(7)
+        await deliver(commenter, 7)
         assert all(b-a >= .045 for a,b in zip(times, times[1:]))
         sender, commenter = make_commenter(count=3, delay=3600)
         first = asyncio.Event()
@@ -237,7 +243,7 @@ def test_comment_interval_and_stop_interrupt_wait():
             first.set()
             return response(201, {"data": {"attributes": {"id": 1, "wish_id": 7}}})
         sender.http.post.side_effect = start
-        task = asyncio.create_task(commenter.send(7))
+        task = asyncio.create_task(deliver(commenter, 7))
         await first.wait()
         sender.stop()
         await asyncio.wait_for(task, 1)
@@ -265,7 +271,7 @@ def test_expiry_and_stop_keep_inflight_comment_for_deletion():
     async def scenario():
         sender, commenter = make_commenter()
         sender.license_expires = time.time() - 1
-        await commenter.send(7)
+        await deliver(commenter, 7)
         sender.http.post.assert_not_awaited()
         sender, commenter = make_commenter()
         started, finish = asyncio.Event(), asyncio.Event()
@@ -274,11 +280,174 @@ def test_expiry_and_stop_keep_inflight_comment_for_deletion():
             await finish.wait()
             return response(201, {"data": {"attributes": {"id": 50, "wish_id": 7}}})
         sender.http.post.side_effect = post
-        task = asyncio.create_task(commenter.send(7))
+        task = asyncio.create_task(deliver(commenter, 7))
         await started.wait()
         sender.stop()
         finish.set()
         await asyncio.wait_for(task, 1)
         assert sender.comments_sent == 1 and sender.http.post.await_count == 1
         assert sender.active_batch["comments"] == {50}
+    asyncio.run(scenario())
+
+
+def test_every_page_is_covered_in_round_robin_order(monkeypatch):
+    async def scenario():
+        http, posts, comments, *_ = fixture(monkeypatch, can_post=False)
+        original = http.get.side_effect
+        async def get(url, **kwargs):
+            if not url.endswith("/wishes"):
+                return await original(url, **kwargs)
+            cursor = kwargs["params"]["page_start"]
+            ids = [100, 101] if not cursor else [101, 102, 103]
+            return response(data={"data": [{"attributes": {"id": i, "wall_id": 22}} for i in ids],
+                                  "meta": {"next": "page-2" if not cursor else None}})
+        http.get.side_effect = get
+        sender = Sender()
+        await sender.queue_run(URL, "", "", 1, 0,
+                               comments={"enabled": True, "body": "text", "count": 3, "delay": 0})
+        await sender.worker
+        assert [c["wish_id"] for c in comments] == [100, 101, 102, 103] * 3
+        assert sender.comments_targets == 4 and sender.comments_total == 12
+        assert not posts and sender.phase == "finished"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("limited_kind", ["comments", "posts"])
+def test_rate_limit_wait_is_isolated_and_other_worker_keeps_running(monkeypatch, limited_kind):
+    async def scenario():
+        http, posts, comments, _, browsers = fixture(monkeypatch)
+        original = http.post.side_effect
+        blocked, release, other_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        first = True
+        async def post(url, **kwargs):
+            nonlocal first
+            is_comment = url.endswith("/comments")
+            if is_comment == (limited_kind == "comments") and first:
+                first = False
+                return response(429, headers={"Retry-After": "30"})
+            result = await original(url, **kwargs)
+            if (limited_kind == "comments" and len(posts) == 3 or
+                    limited_kind == "posts" and len(comments) == 2):
+                other_finished.set()
+            return result
+        http.post.side_effect = post
+        sender = Sender()
+        async def wait(seconds):
+            blocked.set()
+            await release.wait()
+            return sender.stop_event.is_set()
+        sender.wait = wait
+        await sender.queue_run(URL, "title", "", 3, 0,
+                               comments={"enabled": True, "body": "text", "count": 2, "delay": 0})
+        try:
+            await asyncio.wait_for(blocked.wait(), 1)
+            await asyncio.wait_for(other_finished.wait(), 1)
+            assert sender.running and not sender.stop_event.is_set()
+            assert not browsers[0].closed
+            if limited_kind == "comments":
+                assert sender.commenter.phase == "backoff" and len(posts) == 3
+            else:
+                assert sender.commenter.backoff_until == 0 and len(comments) == 2
+        finally:
+            release.set()
+            await asyncio.wait_for(sender.worker, 2)
+        assert len(posts) == 3 and len(comments) == 8
+        assert sender.phase == "finished" and browsers[0].closed
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_kind", ["comments", "posts"])
+@pytest.mark.parametrize("failure", [response(403), RuntimeError("private-token"), response(201, {})])
+def test_fatal_failure_only_stops_its_own_worker(monkeypatch, failure_kind, failure):
+    async def scenario():
+        http, posts, comments, *_ = fixture(monkeypatch)
+        original = http.post.side_effect
+        async def post(url, **kwargs):
+            if url.endswith("/comments") == (failure_kind == "comments"):
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+            return await original(url, **kwargs)
+        http.post.side_effect = post
+        sender = Sender()
+        await sender.queue_run(URL, "title", "", 3, 0,
+                               comments={"enabled": True, "body": "text", "count": 2, "delay": 0})
+        await asyncio.wait_for(sender.worker, 2)
+        assert not sender.stop_event.is_set()
+        if failure_kind == "comments":
+            assert len(posts) == 3 and sender.commenter.failed
+        else:
+            assert len(comments) == 2 and not sender.commenter.failed
+        assert sender.phase == "error"
+        assert "private-token" not in json.dumps(sender.status())
+    asyncio.run(scenario())
+
+
+def test_comment_listing_failure_does_not_prevent_posts(monkeypatch):
+    async def scenario():
+        http, posts, comments, *_ = fixture(monkeypatch)
+        original = http.get.side_effect
+        async def get(url, **kwargs):
+            if url.endswith("/wishes"):
+                return response(429)
+            return await original(url, **kwargs)
+        http.get.side_effect = get
+        sender = Sender()
+        await sender.queue_run(URL, "title", "", 3, 0,
+                               comments={"enabled": True, "body": "text", "delay": 0})
+        await asyncio.wait_for(sender.worker, 2)
+        assert len(posts) == 3 and not comments
+        assert sender.commenter.failed and not sender.stop_event.is_set()
+    asyncio.run(scenario())
+
+
+def test_post_preparation_failure_does_not_prevent_comments(monkeypatch):
+    async def scenario():
+        http, posts, comments, *_ = fixture(monkeypatch)
+        monkeypatch.setattr("server.engine.read_fields", AsyncMock(side_effect=ValueError("invalid")))
+        sender = Sender()
+        await sender.queue_run(URL, "title", "", 3, 0,
+                               comments={"enabled": True, "body": "text", "count": 2, "delay": 0})
+        await sender.worker
+        assert not posts and len(comments) == 2
+        assert sender.posts_phase == "error" and sender.commenter.phase == "finished"
+    asyncio.run(scenario())
+
+
+def test_repeated_comment_rate_limits_do_not_stop_posts(monkeypatch):
+    async def scenario():
+        http, posts, comments, *_ = fixture(monkeypatch)
+        original = http.post.side_effect
+        async def post(url, **kwargs):
+            if url.endswith("/comments"):
+                return response(429, headers={"Retry-After": "1"})
+            return await original(url, **kwargs)
+        http.post.side_effect = post
+        sender = Sender()
+        sender.wait = AsyncMock(return_value=False)
+        await sender.queue_run(URL, "title", "", 3, 0,
+                               comments={"enabled": True, "body": "text", "delay": 0})
+        await sender.worker
+        assert len(posts) == 3 and sender.commenter.failed and not sender.stop_event.is_set()
+        assert sum(c.args[0].endswith("/comments") for c in http.post.await_args_list) == 6
+    asyncio.run(scenario())
+
+
+def test_deleted_post_is_skipped_without_losing_other_targets():
+    async def scenario():
+        sender, commenter = make_commenter(count=2)
+        ids = []
+        async def post(url, **kwargs):
+            identity = kwargs["json"]["attributes"]["wish_id"]
+            ids.append(identity)
+            if identity == 7:
+                return response(404)
+            return response(201, {"data": {"attributes": {"id": len(ids), "wish_id": identity}}})
+        sender.http.post.side_effect = post
+        for identity in (7, 8, 9):
+            commenter.enqueue(identity)
+        commenter.finish()
+        await commenter.run()
+        assert ids == [7, 8, 9, 8, 9] and sender.comments_sent == 4
+        assert not commenter.failed and not sender.stop_event.is_set()
     asyncio.run(scenario())

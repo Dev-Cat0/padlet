@@ -17,7 +17,7 @@ from .anonymous import padlet_url, prepare, check_response, read_sections, build
 from .browser import BrowserSession, BrowserHTTP, created_post, deletion_hashid
 from .errors import rejection_message
 from .fields import validate_fields, read_fields
-from .comments import CommentOptions, CommentSender, post_id, read_posts
+from .comments import CommentOptions, CommentSender, post_id
 
 MAX_INFLIGHT_REQUESTS = 32
 logger = logging.getLogger(__name__)
@@ -83,6 +83,8 @@ class Sender:
         self.comments_sent = self.comments_errors = self.comments_targets = 0
         self.execution_mode = "pending"
         self.comments_total = 0
+        self.posts_phase = "disabled"
+        self.posts_active = False
 
     def log(self, message, level="info"):
         self.sequence += 1
@@ -95,6 +97,8 @@ class Sender:
                 "board": self.board, "phase": "deleting" if self.deleting else self.phase,
                 "sent": self.sent, "errors": self.errors,
                 "comments_sent": self.comments_sent, "comments_errors": self.comments_errors,
+                "posts_phase": self.phase if self.posts_active else self.posts_phase,
+                "comments_phase": self.commenter.phase if self.commenter else "disabled",
                 "comments_targets": self.comments_targets,
                 "execution_mode": self.execution_mode, "comments_total": self.comments_total,
                 "limit": self.limit, "rounds": self.rounds, "target_count": self.target_count,
@@ -133,6 +137,7 @@ class Sender:
             self.sent = self.errors = self.rounds = 0
             self.comments_sent = self.comments_errors = self.comments_targets = 0
             self.execution_mode, self.comments_total = "pending", 0
+            self.posts_phase, self.posts_active = "preparing", False
             self.commenter = CommentSender(self, options) if options.enabled else None
             self.limit, self.target_count = limit, 1
             self.automatic, self.opening, self.phase = True, True, "preparing"
@@ -143,6 +148,7 @@ class Sender:
 
     async def automatic_run(self, url, subject, body, limit, delay):
         stage = "브라우저 시작·게시판 접속"
+        comment_task = None
         try:
             await self.clear_connection()
             self.browser = BrowserSession(self)
@@ -177,43 +183,57 @@ class Sender:
                     self.log("익명 게시글 작성이 막혀 있어 기존 게시글에 댓글만 작성합니다.", "warning")
                 sections, fields = [], {}
                 if can_post:
-                    stage = "섹션 목록 조회"
-                    sections = await read_sections(transport, transport.origin, {}, template["wall_id"])
-                    stage = "필수 입력 항목 조회"
-                    fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
-                    subject, body, extra = validate_fields(fields, subject, body, "", {})
-                    template.update(extra)
+                    try:
+                        stage = "섹션 목록 조회"
+                        sections = await read_sections(transport, transport.origin, {}, template["wall_id"])
+                        stage = "필수 입력 항목 조회"
+                        fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
+                        subject, body, extra = validate_fields(fields, subject, body, "", {})
+                        template.update(extra)
+                    except Exception:
+                        if not can_comment:
+                            raise
+                        can_post = False
+                        self.posts_phase = "error"
+                        self.execution_mode = "comments"
+                        self.errors += 1
+                        self.log("게시글 준비에 실패해 게시글만 중단합니다. 댓글 작업은 계속됩니다.", "error")
                 self.http, self.endpoint, self.template = transport, endpoint, template
                 self.board = {"url": board_url, "title": str(state["wall"].get("title") or "게시판"),
                     "approval_required": not template["published"], "sections": sections, "fields": fields}
                 self.target_count = len(sections) or 1
-                existing_posts = []
-                if self.commenter:
-                    stage = "댓글 대상 게시글 조회"
-                    existing_posts = await read_posts(transport, template, self.commenter.stopped)
-                    self.comments_total = len(existing_posts) * self.commenter.options.count
             if self.stop_event.is_set():
                 self.phase = "stopped"
                 return
             self.opening = False
             self.running, self.ready = True, True
             if self.commenter:
-                scope = "와 이번 실행의 새 게시글" if can_post else ""
-                self.log(f"댓글 준비 완료 · 기존 게시글 {len(existing_posts)}개{scope} · 게시글당 {self.commenter.options.count}개")
-                for identity in existing_posts:
-                    await self.commenter.send(identity)
-                    if self.stop_event.is_set():
-                        self.phase = "error" if self.commenter.failed else "stopped"
-                        return
-            if not can_post:
+                comment_task = asyncio.create_task(self.commenter.collect_and_run())
+            if can_post:
+                self.log(f"익명 준비 완료 · 대상 {self.target_count}곳 · 섹션당 {'무제한' if limit == 0 else str(limit) + '건'} · {delay}초마다 전체 섹션 동시 전송", "success")
+                self.posts_active = True
+                try:
+                    await self.run(subject, body, limit, delay, finalize=False)
+                finally:
+                    self.posts_phase, self.posts_active = self.phase, False
+            elif self.posts_phase != "error":
+                self.posts_phase = "disabled"
+            if self.commenter:
+                self.commenter.finish()
+                self.phase = "commenting"
+                await comment_task
+            if self.stop_event.is_set():
+                self.phase = "stopped"
+            elif self.posts_phase == "error" or self.commenter and self.commenter.failed:
+                self.phase = "error"
+            else:
                 self.phase = "finished"
-                self.log(f"댓글 작성 완료 · 대상 {len(existing_posts)}개 게시글 / 댓글 {self.comments_sent}건", "success")
-                return
-            self.log(f"익명 준비 완료 · 대상 {self.target_count}곳 · 섹션당 {'무제한' if limit == 0 else str(limit) + '건'} · {delay}초마다 전체 섹션 동시 전송", "success")
-            await self.run(subject, body, limit, delay)
+            self.log(f"작업 종료 · 게시글 {self.sent}건 / 댓글 {self.comments_sent}건 / 오류 {self.errors}건",
+                     "success" if self.phase == "finished" else "warning")
         except asyncio.CancelledError:
             self.phase = "stopped"
-            self.log("준비를 중지했습니다. 게시 요청을 보내지 않았습니다.")
+            self.stop_event.set()
+            self.log("작업을 중지했습니다. 전송 중인 응답을 정리합니다.")
         except Exception as error:
             self.phase = "error"
             self.errors += 1
@@ -232,6 +252,12 @@ class Sender:
                 message = f"{stage} 중 내부 오류가 발생했습니다. 서버 로그를 확인하세요."
             self.log(message, "error")
         finally:
+            # Both workers must settle before their shared guest browser is closed.
+            if comment_task and not comment_task.done():
+                self.stop_event.set()
+                self.commenter.finish()
+                await asyncio.gather(comment_task, return_exceptions=True)
+            self.posts_active = False
             # Close Chromium; retain only our bot's deletion credentials in memory.
             board = self.board
             await self.clear_connection()
@@ -355,8 +381,6 @@ class Sender:
 
     async def send_section(self, section, subject, body, semaphore, paused):
         async with semaphore:
-            if self.commenter and not await self.commenter.ready():
-                return "pending", 0
             # Deadline is checked at dispatch as well as by the expiry timer.
             if self.license_expires is not None and time.time() >= self.license_expires:
                 self.stop_event.set()
@@ -383,8 +407,6 @@ class Sender:
                     self.ready = False
                 self.errors += 1
                 paused.set()
-                if self.commenter:
-                    self.stop_event.set()
                 self.log(f"{label}: 네트워크 오류로 중지했습니다. 마지막 게시 성공 여부를 확인하세요.", "error")
                 return "error", 0
             status = response.status_code
@@ -411,7 +433,7 @@ class Sender:
                         identity = post_id(response.json(), self.template["wall_id"])
                     except (ValueError, TypeError, AttributeError):
                         identity = None
-                    await self.commenter.send(identity)
+                    self.commenter.enqueue(identity)
                 return "ok", 0
             self.errors += 1
             if status in {200, 201}:
@@ -423,11 +445,7 @@ class Sender:
                     retry = max(0, retry) if math.isfinite(retry) else 0
                 except ValueError:
                     retry = 0
-                if self.commenter:
-                    self.commenter.backoff_until = max(self.commenter.backoff_until, time.monotonic() + max(3, retry))
                 return "limited", retry
-            if self.commenter:
-                self.stop_event.set()
             if status in {401, 403} or challenge or status in {200, 201}:
                 self.ready = False
             private_values = [value for key, value in self.headers.items()
@@ -441,7 +459,7 @@ class Sender:
             self.log(f"{label}: {reason}", "error")
             return "error", 0
 
-    async def run(self, subject, body, limit, delay):
+    async def run(self, subject, body, limit, delay, finalize=True):
         # Each round covers every discovered section exactly once.
         targets = copy.deepcopy((self.board or {}).get("sections", [])) or [None]
         try:
@@ -455,7 +473,8 @@ class Sender:
             self.phase = "error"
             self.log("전송 작업 오류. 게시판에 다시 연결한 후 시도하세요.", "error")
         finally:
-            self.running = False
+            if finalize:
+                self.running = False
             self.last_activity = time.monotonic()
 
     async def run_pipelined(self, targets, subject, body, limit, delay):
@@ -539,14 +558,14 @@ class Sender:
                     await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
                 else:
                     break
-            if fatal or self.commenter and self.commenter.failed:
+            if fatal:
                 self.phase = "error"
             elif self.stop_event.is_set():
                 self.phase = "stopped"
                 self.log("사용자가 전송을 중지했습니다.")
             else:
                 self.phase = "finished"
-                self.log(f"전송 완료 · {self.rounds}회 반복 / 게시글 {self.sent}건 / 댓글 {self.comments_sent}건 / 오류 {self.errors}건", "success")
+                self.log(f"게시글 전송 완료 · {self.rounds}회 반복 / 게시글 {self.sent}건", "success")
         finally:
             # An unexpected exception must not leave POST tasks running after session cleanup.
             if active:

@@ -113,6 +113,14 @@ def main():
         assert abs(page.locator("#progress").evaluate("(el) => el.value") - 100 / 3) < .01
         assert "전체 3개 섹션" in page.locator("#board").inner_text()
         assert "총 9건 예정" in page.locator("#board").inner_text()
+        for post_phase, comment_phase, expected in [
+            ('sending','backoff','게시글: 작성 중 / 댓글: 요청 제한 · 대기 중'),
+            ('error','commenting','게시글: 오류로 중단 / 댓글: 작성 중'),
+            ('backoff','commenting','게시글: 요청 제한 · 대기 중 / 댓글: 작성 중')]:
+            page.evaluate("s => render(s)", dict(state, running=True, opening=False,
+                phase='sending', execution_mode='both', posts_phase=post_phase, comments_phase=comment_phase))
+            assert page.locator('#phase').inner_text() == expected
+            assert page.locator('#start').is_disabled() and not page.locator('#stop').is_disabled()
         page.evaluate("""() => render({ready:false,running:true,opening:false,phase:'commenting',
             execution_mode:'comments',comments_total:4,comments_sent:2,
             board:{title:'Fixture',sections:[]},sent:0,errors:0,limit:50,logs:[]})""")

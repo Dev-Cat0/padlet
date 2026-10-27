@@ -87,7 +87,11 @@ function render(next) {
   $('commentsSent').textContent=next.comments_sent||0;
   $('commentStatus').textContent='댓글 대상 '+(next.comments_targets||0)+'개 게시글 · 댓글 오류 '+(next.comments_errors||0)+'건';
   $('errors').textContent=next.errors;
-  $('phase').textContent=phases[next.phase]||next.phase;
+  const workerPhases={disabled:'꺼짐',preparing:'준비 중',waiting:'대기 중',sending:'작성 중',commenting:'작성 중',backoff:'요청 제한 · 대기 중',finished:'완료',error:'오류로 중단',stopped:'중지됨'};
+  const separate=next.running&&next.execution_mode==='both'&&next.posts_phase&&next.comments_phase;
+  $('phase').textContent=separate
+    ? '게시글: '+(workerPhases[next.posts_phase]||next.posts_phase)+' / 댓글: '+(workerPhases[next.comments_phase]||next.comments_phase)
+    : phases[next.phase]||next.phase;
   const commentsOnly=next.execution_mode==='comments';
   const total=commentsOnly?(next.comments_total||0):next.limit*(next.target_count||1);
   $('progress').setAttribute('aria-label',commentsOnly?'댓글 작성 진행률':'게시글 전송 진행률');

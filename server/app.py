@@ -196,7 +196,7 @@ class RunRequest(BaseModel):
 @app.get("/healthz")
 async def health():
     return {"status": "ok", "app": "padlet-sender", "key_auth": "server-v2",
-            "features": {"anonymous_comments": True, "permission_fallback": True}}
+            "features": {"anonymous_comments": True, "permission_fallback": True, "independent_comment_worker": True, "round_robin_comments": True}}
 
 
 @app.get("/api/state")
