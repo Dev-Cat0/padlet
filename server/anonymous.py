@@ -35,9 +35,9 @@ def check_response(response, stage):
         raise ValueError("게시판 응답이 너무 큽니다.")
 
 
-def build_template(state):
+def build_template(state, require_write=True):
     wall, user = state.get("wall") or {}, state.get("user") or {}
-    if state.get("canIWrite") is not True or state.get("isReadOnly") or wall.get("frozen"):
+    if wall.get("frozen") or require_write and (state.get("canIWrite") is not True or state.get("isReadOnly")):
         raise ValueError("이 게시판은 현재 익명 글쓰기를 허용하지 않습니다.")
     if user.get("registered_at") or user.get("username") or user.get("email"):
         raise ValueError("익명 방문자 세션을 확인할 수 없습니다.")

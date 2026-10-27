@@ -48,11 +48,12 @@ class Sessions:
             if any(s.sender is not sender and (s.sender.browser or s.sender.opening or s.sender.deleting)
                    for s in self.items.values()):
                 raise HTTPException(429, "서버가 다른 작업을 처리 중입니다. 잠시 후 실행하세요.")
+            options = {}
             if before_start:
-                await sender.queue_run(data.url, data.subject, data.body, data.limit, data.delay,
-                                       before_start=before_start)
-            else:
-                await sender.queue_run(data.url, data.subject, data.body, data.limit, data.delay)
+                options["before_start"] = before_start
+            if getattr(data, "comments", None) is not None:
+                options["comments"] = data.comments
+            await sender.queue_run(data.url, data.subject, data.body, data.limit, data.delay, **options)
             if request_id:
                 session.accepted[request_id] = fingerprint
 

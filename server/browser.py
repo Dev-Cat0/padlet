@@ -73,8 +73,10 @@ class BrowserHTTP:
         parsed = urlsplit(url)
         if (f"{parsed.scheme}://{parsed.netloc}" != self.origin or parsed.username
                 or parsed.password or method not in {"GET", "POST", "DELETE"}
-                or method == "POST" and url != self.endpoint
-                or method == "DELETE" and not re.fullmatch(re.escape(self.endpoint) + r"/[A-Za-z0-9_-]{1,128}", url)):
+                or method == "POST" and url not in {self.endpoint, self.origin + "/api/8/comments"}
+                or method == "DELETE" and not (
+                    re.fullmatch(re.escape(self.endpoint) + r"/[A-Za-z0-9_-]{1,128}", url)
+                    or re.fullmatch(re.escape(self.origin) + r"/api/5/comments/[1-9][0-9]{0,19}", url))):
             raise ValueError("캡처한 게시판과 다른 주소로 전송할 수 없습니다.")
         result = await self.page.evaluate("""async ({method, url, payload, timeout, pageUrl}) => {
             if (location.href !== pageUrl || new URL(url).origin !== location.origin)

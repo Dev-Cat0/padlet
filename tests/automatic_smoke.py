@@ -19,11 +19,13 @@ async def main():
     board_pages = []
     light_pages = []
     deleted = []
+    comments = []
+    post_permission = comment_permission = True
 
     async def route(self, route):
         path = urlsplit(route.request.url).path
         if route.request.method == "DELETE":
-            assert path.startswith("/api/9/wishes/post")
+            assert path.startswith("/api/9/wishes/post") or path.startswith("/api/5/comments/")
             headers = await route.request.all_headers()
             assert "guest=fixture" in headers.get("cookie", "")
             assert headers["x-csrf-token"] == "fixture" and headers["x-uid"] == "fixture-uid"
@@ -49,7 +51,7 @@ async def main():
             assert len(current.context.pages) == 1
             assert await current.locator("article, script").count() == 0
             light_pages.append(current)
-            return await route.fulfill(json={"canIWrite":True,
+            return await route.fulfill(json={"canIWrite":post_permission,"canIComment":comment_permission,"isReadOnly":not post_permission,
                 "wall":{"id":22,"hashid":"board","wish_arrangement":{"default_section_id":2}},
                 "user":{"id":31,"hashid":"guest","registered_at":None}})
         if path == "/api/5/wall_sections":
@@ -59,6 +61,8 @@ async def main():
         if path.endswith("/custom-post-properties"):
             return await route.fulfill(json={"data":[]})
         if path == "/api/9/wishes":
+            if route.request.method == "GET":
+                return await route.fulfill(json={"data":[{"id":"700","attributes":{"id":700,"wall_id":22}}]})
             posts.append(route.request.post_data_json)
             post_id = len(posts)
             headers = await route.request.all_headers()
@@ -73,7 +77,16 @@ async def main():
             if challenge:
                 return await route.fulfill(status=403, headers={"cf-mitigated":"challenge"},body="Verify")
             return await route.fulfill(status=201,json={"data":{"id":post_id,
-                "attributes":{"hashid":f"post{post_id}"}}})
+                "attributes":{"id":post_id,"wall_id":22,"hashid":f"post{post_id}"}}})
+        if path == "/api/8/comments":
+            attrs = route.request.post_data_json["attributes"]
+            headers = await route.request.all_headers()
+            assert "guest=fixture" in headers.get("cookie", "")
+            assert headers["x-csrf-token"] == "fixture" and headers["x-uid"] == "fixture-uid"
+            assert attrs["user_id"] == 31 and attrs["user_hashid"] == "guest"
+            comments.append(attrs)
+            return await route.fulfill(status=201,json={"data":{"attributes":{
+                "id":1000+len(comments),"wish_id":attrs["wish_id"]}}})
         await route.abort()
 
     sender = Sender()
@@ -106,9 +119,42 @@ async def main():
             assert set(deleted) == {f"/api/9/wishes/post{i}" for i in range(1, 19)}
             assert len(deleted) == 18 and len(board_pages) == 3
             assert sender.browser is None and not sender.deletion_batches
+            challenge = False
+            await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 1, 0,
+                                   comments={"enabled":True,"body":"Comment","count":2,"delay":0})
+            await sender.worker
+            assert sender.phase == "finished" and sender.comments_sent == 8
+            assert len(comments) == 8 and sum(c["wish_id"] == 700 for c in comments) == 2
+            assert sender.status()["delete_pending"] == 11
+            await sender.queue_delete()
+            await sender.delete_worker
+            assert sender.status()["delete_pending"] == 0
+            assert len([url for url in deleted if url.startswith('/api/5/comments/')]) == 8
+            assert not any(url.endswith('/700') for url in deleted)
+            previous_posts, previous_comments = len(posts), len(comments)
+            post_permission = False
+            await sender.queue_run("https://padlet.com/example/board", "", "", 50, 0,
+                                   comments={"enabled":True,"body":"Comment only","count":2,"delay":0})
+            await sender.worker
+            assert sender.phase == "finished" and sender.execution_mode == "comments"
+            assert len(posts) == previous_posts and len(comments) == previous_comments + 2
+            post_permission, comment_permission = True, False
+            await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 1, 0,
+                                   comments={"enabled":True,"body":"Unavailable","count":2,"delay":0})
+            await sender.worker
+            assert sender.phase == "finished" and sender.execution_mode == "posts"
+            assert len(posts) == previous_posts + 3 and len(comments) == previous_comments + 2
+            post_permission = False
+            await sender.queue_run("https://padlet.com/example/board", "Title", "Body", 1, 0,
+                                   comments={"enabled":True,"body":"Unavailable","count":2,"delay":0})
+            await sender.worker
+            assert sender.phase == "error" and sender.execution_mode == "none"
+            assert len(posts) == previous_posts + 3 and len(comments) == previous_comments + 2
             print(json.dumps({"automatic_preparation":True,"all_sections_each_round":True,
                 "overlapping_rounds":True,"large_board_retired":True,"session_preserved":True,
                 "emergency_deletion_restores_identity":True,
+                "anonymous_comments_existing_and_created_posts":True,
+                "permission_modes":True,
                 "manual_steps":0,"challenge_stops":True,"real_posts":0,"real_deletions":0}))
         finally:
             await sender.shutdown()
