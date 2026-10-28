@@ -20,9 +20,18 @@ async def main():
         ("correct", PASSWORD, True), ("forbidden_gate", PASSWORD, True),
         ("wrong", "wrong-secret", False), ("missing", None, False),
         ("login", PASSWORD, False), ("external", PASSWORD, False),
-        ("challenge", PASSWORD, False), ("get_form", PASSWORD, False)]:
+        ("challenge", PASSWORD, False), ("get_form", PASSWORD, False),
+        ("bootstrap", PASSWORD, True), ("bootstrap_canonical", PASSWORD, True), ("bootstrap_wrong", "wrong-secret", False),
+        ("bootstrap_missing", None, False), ("bootstrap_external", PASSWORD, False),
+        ("bootstrap_other_board", PASSWORD, False)]:
         attempts = []
+        board_url = "https://padlet.com/example/title-board" if mode == "bootstrap_canonical" else URL
         def gate():
+            if mode.startswith('bootstrap'):
+                action = 'https://evil.example/collect' if mode == 'bootstrap_external' else '/other/board' if mode == 'bootstrap_other_board' else URL
+                state = {'showPasswordInput':True,'passwordSubmitUrl':action,'passwordErrorText':None}
+                # Real AccessRequestApp emits inline state, not a password input.
+                return '<meta name="csrf-token" content="fixture-csrf"><div id="app"></div><script>window.ww={vueStartingState:'+json.dumps(state)+'}</script>'
             action = "https://evil.example/collect" if mode == "external" else URL
             email = '<input type="email">' if mode == "login" else ''
             method = 'get' if mode == 'get_form' else 'post'
@@ -32,8 +41,11 @@ async def main():
             assert urlsplit(request.url).hostname == "padlet.com"
             if request.method == "POST":
                 assert request.url == URL
-                attempts.append(parse_qs(request.post_data)["password"][0])
-                if mode in {"correct", "forbidden_gate"} and attempts[-1] == PASSWORD:
+                payload = parse_qs(request.post_data)
+                attempts.append(payload["password"][0])
+                if mode.startswith('bootstrap'):
+                    assert payload['authenticity_token'] == ['fixture-csrf']
+                if mode in {"correct", "forbidden_gate", "bootstrap", "bootstrap_canonical"} and attempts[-1] == PASSWORD:
                     return await route.fulfill(content_type="text/html", body=BOOTSTRAP,
                         headers={"Set-Cookie":"board_access=fixture; Secure; HttpOnly; Path=/"})
                 return await route.fulfill(content_type="text/html", body=gate())
@@ -41,7 +53,7 @@ async def main():
                 headers = await request.all_headers()
                 assert "board_access=fixture" in headers.get("cookie", "")
                 return await route.fulfill(json={"authorized": True})
-            if request.url == URL:
+            if request.url == board_url:
                 headers = {"cf-mitigated":"challenge"} if mode == "challenge" else {}
                 return await route.fulfill(status=403 if mode in {"challenge","forbidden_gate"} else 200,
                                            content_type="text/html", headers=headers, body=gate())
@@ -52,7 +64,7 @@ async def main():
         with patch.object(BrowserSession, "route", route):
             try:
                 try:
-                    await browser.open(URL, password=supplied)
+                    await browser.open(board_url, password=supplied)
                     success = True
                 except ValueError as error:
                     success = False
@@ -65,7 +77,7 @@ async def main():
                     result = await transport.get("https://padlet.com/api/11/padlet-starting-state/example/board")
                     assert result.json() == {"authorized": True}
                     assert PASSWORD not in json.dumps(await browser.snapshot())
-                assert len(attempts) == (1 if mode in {"correct","forbidden_gate","wrong"} else 0)
+                assert len(attempts) == (1 if mode in {"correct","forbidden_gate","wrong","bootstrap","bootstrap_canonical","bootstrap_wrong"} else 0)
                 assert PASSWORD not in json.dumps(sender.status())
                 cases.append(mode)
             finally:

@@ -275,3 +275,16 @@ def test_browser_routes_require_auth_and_open_uses_capture(monkeypatch, licensed
         assert client.post("/api/browser/action", headers=headers,
                            json={"kind": "click", "x": 10, "y": 10}).status_code == 410
         assert client.get("/api/browser/frame", headers=headers).status_code == 409
+
+
+@pytest.mark.parametrize('target', ['https://evil.example/a', '/auth/login', '/other/board',
+                                   '/example/other', '/example/board?secret=1', '//evil.example/x'])
+def test_password_gate_rejects_unrelated_destinations(target):
+    from server.browser import password_submit_url
+    with pytest.raises(ValueError):
+        password_submit_url('https://padlet.com/example/title-board', target)
+
+
+def test_password_gate_accepts_canonical_board_destination():
+    from server.browser import password_submit_url
+    assert password_submit_url('https://padlet.com/example/title-board','/example/board') == 'https://padlet.com/example/board'

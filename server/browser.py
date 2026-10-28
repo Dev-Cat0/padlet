@@ -6,7 +6,7 @@ import re
 import socket
 import time
 from contextlib import suppress
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from playwright.async_api import async_playwright, TimeoutError as BrowserTimeoutError
 
@@ -46,6 +46,25 @@ def deletion_hashid(data):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) else None
 
 
+def password_submit_url(board_url, target):
+    """Only submit to this board's normal or canonical URL, never an account route."""
+    if not isinstance(target, str) or not target or len(target) > 2000:
+        raise ValueError("게시판 비밀번호 제출 주소를 확인하지 못했습니다.")
+    board = urlsplit(padlet_url(board_url))
+    destination = urlsplit(urljoin(board_url, target))
+    if destination.query or destination.fragment:
+        raise ValueError("게시판 비밀번호 제출 주소를 확인하지 못했습니다.")
+    normalized = padlet_url(destination.geturl())
+    source_parts = board.path.strip("/").split("/")
+    target_parts = destination.path.strip("/").split("/")
+    if ((destination.scheme, destination.netloc) != (board.scheme, board.netloc)
+            or source_parts[:-1] != target_parts[:-1]
+            or not (source_parts[-1] == target_parts[-1]
+                    or source_parts[-1].endswith("-" + target_parts[-1]))):
+        raise ValueError("게시판 비밀번호 제출 주소가 현재 게시판과 다릅니다.")
+    return normalized
+
+
 class BrowserResponse:
     def __init__(self, result):
         self.status_code = result["status"]
@@ -73,10 +92,8 @@ class BrowserHTTP:
         parsed = urlsplit(url)
         if (f"{parsed.scheme}://{parsed.netloc}" != self.origin or parsed.username
                 or parsed.password or method not in {"GET", "POST", "DELETE"}
-                or method == "POST" and url not in {self.endpoint, self.origin + "/api/8/comments"}
-                or method == "DELETE" and not (
-                    re.fullmatch(re.escape(self.endpoint) + r"/[A-Za-z0-9_-]{1,128}", url)
-                    or re.fullmatch(re.escape(self.origin) + r"/api/5/comments/[1-9][0-9]{0,19}", url))):
+                or method == "POST" and url != self.endpoint
+                or method == "DELETE" and not re.fullmatch(re.escape(self.endpoint) + r"/[A-Za-z0-9_-]{1,128}", url)):
             raise ValueError("캡처한 게시판과 다른 주소로 전송할 수 없습니다.")
         result = await self.page.evaluate("""async ({method, url, payload, timeout, pageUrl}) => {
             if (location.href !== pageUrl || new URL(url).origin !== location.origin)
@@ -202,19 +219,69 @@ class BrowserSession:
             finally:
                 password = None
         if not self.capture_enabled:
+            kind = await self.wait_entry()
+            if kind != "ready":
+                raise ValueError("비밀번호가 필요한 게시판입니다. 비밀번호 게시판 옵션을 켜고 입력하세요.")
+
+    async def wait_entry(self):
+        # AccessRequestApp's initial document has no input elements. Its inline
+        # starting state is available even when the Vue bundle cannot mount.
+        try:
+            handle = await self.page.wait_for_function("""() => {
+                if (window.ww?.vueStartingState?.showPasswordInput === true) return 'gate';
+                if (document.querySelector('meta[name="csrf-token"]')?.content && window.ww?.uid) return 'ready';
+                if ([...document.querySelectorAll('input[type="password"]')].some(el => el.getClientRects().length)) return 'form';
+                return false;
+            }""", timeout=15000)
             try:
-                handle = await self.page.wait_for_function("""() => Boolean(
-                    document.querySelector('meta[name="csrf-token"]')?.content && window.ww?.uid ||
-                    [...document.querySelectorAll('input[type="password"]')].some(el => el.getClientRects().length)
-                )""", timeout=15000)
+                return await handle.json_value()
+            finally:
                 await handle.dispose()
-                if await self.page.locator('input[type="password"]:visible').count():
-                    raise ValueError("비밀번호가 필요한 게시판입니다. 비밀번호 게시판 옵션을 켜고 입력하세요.")
-            except BrowserTimeoutError:
-                raise ValueError("익명 세션 정보를 확인하지 못했습니다 (15초). 로그인·보안 확인이 필요하거나 페이지 로딩이 지연되고 있습니다.") from None
+        except BrowserTimeoutError:
+            raise ValueError("익명 세션 정보를 확인하지 못했습니다 (15초). 페이지 로딩 또는 보안 확인 상태를 확인하세요.") from None
 
     async def unlock(self, password):
-        """Submit the board's own password form once, preserving guest cookies."""
+        kind = await self.wait_entry()
+        if kind == "ready":
+            return
+        if kind == "form":
+            await self.unlock_form(password)
+            return
+        target = await self.page.evaluate("() => window.ww.vueStartingState.passwordSubmitUrl")
+        action = password_submit_url(self.page.url, target)
+        self.sender.log("게시판 비밀번호를 확인합니다.")
+        # This is the POST form used by Padlet's AccessRequestApp: password and
+        # authenticity_token, with the guest cookies kept by the same browser.
+        async with self.page.expect_navigation(wait_until="commit", timeout=25000) as navigation:
+            await self.page.evaluate("""({action, password}) => {
+                const state = window.ww?.vueStartingState;
+                const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+                if (state?.showPasswordInput !== true || !csrf ||
+                    new URL(state.passwordSubmitUrl, location.href).href !== action ||
+                    new URL(action).origin !== location.origin) throw new Error('Invalid password gate');
+                const form = document.createElement('form');
+                form.method = 'POST'; form.action = action;
+                for (const [name, value] of Object.entries({password, authenticity_token:csrf})) {
+                    const input = document.createElement('input');
+                    input.type = 'hidden'; input.name = name; input.value = value;
+                    form.appendChild(input);
+                }
+                document.body.appendChild(form);
+                form.submit();
+            }""", {"action": action, "password": password})
+            password = None
+        response = await navigation.value
+        if response and response.headers.get("cf-mitigated") == "challenge":
+            raise ValueError("비밀번호 확인 중 Padlet 보안 확인이 필요합니다.")
+        if response and response.status >= 400 and response.status not in {401, 403}:
+            raise ValueError(f"비밀번호 확인 요청 실패 (HTTP {response.status}).")
+        padlet_url(self.page.url)
+        if await self.wait_entry() != "ready":
+            raise ValueError("비밀번호가 틀렸거나 게시판 접근이 허용되지 않았습니다. 비밀번호를 확인하세요.")
+        self.sender.log("게시판 비밀번호 확인 완료", "success")
+
+    async def unlock_form(self, password):
+        """Fallback for older server-rendered board password forms."""
         field = self.page.locator('input[type="password"]:visible')
         try:
             await field.first.wait_for(state="visible", timeout=12000)

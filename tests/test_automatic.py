@@ -199,9 +199,8 @@ def test_run_api_uses_discord_session_and_five_fields(monkeypatch, licensed_sess
 
 
 def test_password_is_passed_only_to_browser_and_never_status(monkeypatch):
-    from test_comments import fixture
     async def scenario():
-        http, posts, comments, *_ = fixture(monkeypatch)
+        http, _ = setup(monkeypatch)
         original = __import__('server.engine', fromlist=['BrowserSession']).BrowserSession
         seen = []
         class PasswordBrowser(original):
@@ -211,7 +210,7 @@ def test_password_is_passed_only_to_browser_and_never_status(monkeypatch):
         sender = Sender()
         await sender.queue_run(URL, 'Title', '', 1, 0, password='private-board-password')
         await sender.worker
-        assert seen == ['private-board-password'] and len(posts) == 1
+        assert seen == ['private-board-password'] and http.post.await_count == 2
         assert 'private-board-password' not in str(sender.status())
         assert 'password' not in vars(sender)
     asyncio.run(scenario())

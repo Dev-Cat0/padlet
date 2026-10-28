@@ -58,8 +58,6 @@ class Sessions:
             options = {}
             if before_start:
                 options["before_start"] = before_start
-            if getattr(data, "comments", None) is not None:
-                options["comments"] = data.comments
             if getattr(data, "password", None) is not None:
                 options["password"] = data.password.get_secret_value()
             await sender.queue_run(data.url, data.subject, data.body, data.limit, data.delay, **options)

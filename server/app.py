@@ -19,7 +19,6 @@ from .key_access import KeyAccess
 from .license_admin import routes as license_routes
 from .audit import worker as audit_worker
 from .post_limits import post_limit, STANDARD_POST_LIMIT
-from .comments import CommentOptions
 
 sessions = Sessions()
 key_access = KeyAccess()
@@ -194,7 +193,6 @@ class RunRequest(BaseModel):
     body: str = Field(default="", max_length=20000)
     limit: int = Field(default=50, ge=0, le=1000000)
     delay: float = Field(default=0.3, ge=0, le=86400, allow_inf_nan=False)
-    comments: CommentOptions = Field(default_factory=CommentOptions)
     password: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
 
 
@@ -202,7 +200,7 @@ class RunRequest(BaseModel):
 @app.get("/healthz")
 async def health():
     return {"status": "ok", "app": "padlet-sender", "key_auth": "server-v2",
-            "features": {"anonymous_comments": True, "permission_fallback": True, "independent_comment_worker": True, "round_robin_comments": True, "password_boards": True, "comment_rate_limit_resume": True}}
+            "features": {"anonymous_comments": False, "password_boards": True, "password_bootstrap_auth": True}}
 
 
 @app.get("/api/state")

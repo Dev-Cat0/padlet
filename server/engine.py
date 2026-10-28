@@ -17,7 +17,6 @@ from .anonymous import padlet_url, prepare, check_response, read_sections, build
 from .browser import BrowserSession, BrowserHTTP, created_post, deletion_hashid
 from .errors import rejection_message
 from .fields import validate_fields, read_fields
-from .comments import CommentOptions, CommentSender, post_id
 
 MAX_INFLIGHT_REQUESTS = 32
 logger = logging.getLogger(__name__)
@@ -79,12 +78,6 @@ class Sender:
         self.delete_retry_at = 0
         self.closing = False
         self.license_expires = None
-        self.commenter = None
-        self.comments_sent = self.comments_errors = self.comments_targets = 0
-        self.execution_mode = "pending"
-        self.comments_total = 0
-        self.posts_phase = "disabled"
-        self.posts_active = False
 
     def log(self, message, level="info"):
         self.sequence += 1
@@ -96,13 +89,8 @@ class Sender:
                 "browser": self.browser is not None,
                 "board": self.board, "phase": "deleting" if self.deleting else self.phase,
                 "sent": self.sent, "errors": self.errors,
-                "comments_sent": self.comments_sent, "comments_errors": self.comments_errors,
-                "posts_phase": self.phase if self.posts_active else self.posts_phase,
-                "comments_phase": self.commenter.phase if self.commenter else "disabled",
-                "comments_targets": self.comments_targets,
-                "execution_mode": self.execution_mode, "comments_total": self.comments_total,
                 "limit": self.limit, "rounds": self.rounds, "target_count": self.target_count,
-                "deleting": self.deleting, "delete_pending": sum(len(b["posts"]) + len(b.get("comments", ())) for b in self.deletion_batches),
+                "deleting": self.deleting, "delete_pending": sum(len(b["posts"]) for b in self.deletion_batches),
                 "deleted": self.deleted, "delete_errors": self.delete_errors, "delete_untracked": self.untracked,
                 "delete_retry_after": max(0, math.ceil(self.delete_retry_at - time.monotonic())),
                 "logs": list(self.logs)}
@@ -124,10 +112,9 @@ class Sender:
             await self.http.close()
             self.http = None
 
-    async def queue_run(self, url, subject, body, limit, delay, before_start=None, comments=None, password=None):
+    async def queue_run(self, url, subject, body, limit, delay, before_start=None, password=None):
         """Accept one job promptly; all preparation happens in a fresh bot context."""
         url = padlet_url(url)
-        options = CommentOptions.model_validate(comments or {})
         async with self.lock:
             if self.deleting or self.running or self.opening or self.worker and not self.worker.done():
                 raise ValueError("이미 진행 중인 작업이 있습니다.")
@@ -135,10 +122,6 @@ class Sender:
                 await before_start()
             self.stop_event.clear()
             self.sent = self.errors = self.rounds = 0
-            self.comments_sent = self.comments_errors = self.comments_targets = 0
-            self.execution_mode, self.comments_total = "pending", 0
-            self.posts_phase, self.posts_active = "preparing", False
-            self.commenter = CommentSender(self, options) if options.enabled else None
             self.limit, self.target_count = limit, 1
             self.automatic, self.opening, self.phase = True, True, "preparing"
             self.ready = False
@@ -148,7 +131,6 @@ class Sender:
 
     async def automatic_run(self, url, subject, body, limit, delay, password=None):
         stage = "브라우저 시작·게시판 접속"
-        comment_task = None
         try:
             await self.clear_connection()
             self.browser = BrowserSession(self)
@@ -174,37 +156,13 @@ class Sender:
                 state = response.json()
                 if (state.get("user") or {}).get("registered_at", "unknown") is not None:
                     raise ValueError("봇의 익명 상태를 확인할 수 없어 중단했습니다.")
-                # Validate guest identity and frozen/archived state independently
-                # from post permission: a commenter may not be allowed to post.
-                template = build_template(state, require_write=False)
-                can_post = state.get("canIWrite") is True and not state.get("isReadOnly")
-                can_comment = self.commenter is not None and state.get("canIComment") is True
-                if not can_post and not can_comment:
-                    self.execution_mode = "none"
-                    raise ValueError("실행 가능한 익명 권한이 없습니다. 게시글·댓글 권한과 댓글 옵션을 확인하세요.")
-                if self.commenter and not can_comment:
-                    self.commenter = None
-                    self.log("익명 댓글이 막혀 있어 게시글만 전송합니다.", "warning")
-                self.execution_mode = "both" if can_post and can_comment else "posts" if can_post else "comments"
-                if not can_post:
-                    self.log("익명 게시글 작성이 막혀 있어 기존 게시글에 댓글만 작성합니다.", "warning")
-                sections, fields = [], {}
-                if can_post:
-                    try:
-                        stage = "섹션 목록 조회"
-                        sections = await read_sections(transport, transport.origin, {}, template["wall_id"])
-                        stage = "필수 입력 항목 조회"
-                        fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
-                        subject, body, extra = validate_fields(fields, subject, body, "", {})
-                        template.update(extra)
-                    except Exception:
-                        if not can_comment:
-                            raise
-                        can_post = False
-                        self.posts_phase = "error"
-                        self.execution_mode = "comments"
-                        self.errors += 1
-                        self.log("게시글 준비에 실패해 게시글만 중단합니다. 댓글 작업은 계속됩니다.", "error")
+                template = build_template(state)
+                stage = "섹션 목록 조회"
+                sections = await read_sections(transport, transport.origin, {}, template["wall_id"])
+                stage = "필수 입력 항목 조회"
+                fields = await read_fields(transport, transport.origin, {}, template["wall_id"])
+                subject, body, extra = validate_fields(fields, subject, body, "", {})
+                template.update(extra)
                 self.http, self.endpoint, self.template = transport, endpoint, template
                 self.board = {"url": board_url, "title": str(state["wall"].get("title") or "게시판"),
                     "approval_required": not template["published"], "sections": sections, "fields": fields}
@@ -214,33 +172,11 @@ class Sender:
                 return
             self.opening = False
             self.running, self.ready = True, True
-            if self.commenter:
-                comment_task = asyncio.create_task(self.commenter.collect_and_run())
-            if can_post:
-                self.log(f"익명 준비 완료 · 대상 {self.target_count}곳 · 섹션당 {'무제한' if limit == 0 else str(limit) + '건'} · {delay}초마다 전체 섹션 동시 전송", "success")
-                self.posts_active = True
-                try:
-                    await self.run(subject, body, limit, delay, finalize=False)
-                finally:
-                    self.posts_phase, self.posts_active = self.phase, False
-            elif self.posts_phase != "error":
-                self.posts_phase = "disabled"
-            if self.commenter:
-                self.commenter.finish()
-                self.phase = "commenting"
-                await comment_task
-            if self.stop_event.is_set():
-                self.phase = "stopped"
-            elif self.posts_phase == "error" or self.commenter and self.commenter.failed:
-                self.phase = "error"
-            else:
-                self.phase = "finished"
-            self.log(f"작업 종료 · 게시글 {self.sent}건 / 댓글 {self.comments_sent}건 / 오류 {self.errors}건",
-                     "success" if self.phase == "finished" else "warning")
+            self.log(f"익명 준비 완료 · 대상 {self.target_count}곳 · 섹션당 {'무제한' if limit == 0 else str(limit) + '건'} · {delay}초마다 전체 섹션 동시 전송", "success")
+            await self.run(subject, body, limit, delay)
         except asyncio.CancelledError:
             self.phase = "stopped"
-            self.stop_event.set()
-            self.log("작업을 중지했습니다. 전송 중인 응답을 정리합니다.")
+            self.log("준비를 중지했습니다. 게시 요청을 보내지 않았습니다.")
         except Exception as error:
             self.phase = "error"
             self.errors += 1
@@ -259,12 +195,6 @@ class Sender:
                 message = f"{stage} 중 내부 오류가 발생했습니다. 서버 로그를 확인하세요."
             self.log(message, "error")
         finally:
-            # Both workers must settle before their shared guest browser is closed.
-            if comment_task and not comment_task.done():
-                self.stop_event.set()
-                self.commenter.finish()
-                await asyncio.gather(comment_task, return_exceptions=True)
-            self.posts_active = False
             # Close Chromium; retain only our bot's deletion credentials in memory.
             board = self.board
             await self.clear_connection()
@@ -371,8 +301,6 @@ class Sender:
             self.template.update(fields)
             self.stop_event.clear()
             self.sent = self.errors = self.rounds = 0
-            self.commenter = None
-            self.comments_sent = self.comments_errors = self.comments_targets = 0
             self.limit = limit
             self.target_count = len((self.board or {}).get("sections", [])) or 1
             self.running, self.phase = True, "sending"
@@ -430,17 +358,14 @@ class Sender:
                 except (AttributeError, ValueError, TypeError):
                     hashid = None
                 if hashid and self.browser:
-                    self.deletion_batch()["posts"].add(hashid)
+                    if self.active_batch is None:
+                        self.active_batch = {"endpoint": self.endpoint, "posts": set(), "snapshot": None}
+                        self.deletion_batches.append(self.active_batch)
+                    self.active_batch["posts"].add(hashid)
                 else:
                     self.untracked += 1
                 self.sent += 1
                 self.log(f"{label} · 전송 성공 #{self.sent}", "success")
-                if self.commenter:
-                    try:
-                        identity = post_id(response.json(), self.template["wall_id"])
-                    except (ValueError, TypeError, AttributeError):
-                        identity = None
-                    self.commenter.enqueue(identity)
                 return "ok", 0
             self.errors += 1
             if status in {200, 201}:
@@ -466,7 +391,7 @@ class Sender:
             self.log(f"{label}: {reason}", "error")
             return "error", 0
 
-    async def run(self, subject, body, limit, delay, finalize=True):
+    async def run(self, subject, body, limit, delay):
         # Each round covers every discovered section exactly once.
         targets = copy.deepcopy((self.board or {}).get("sections", [])) or [None]
         try:
@@ -480,8 +405,7 @@ class Sender:
             self.phase = "error"
             self.log("전송 작업 오류. 게시판에 다시 연결한 후 시도하세요.", "error")
         finally:
-            if finalize:
-                self.running = False
+            self.running = False
             self.last_activity = time.monotonic()
 
     async def run_pipelined(self, targets, subject, body, limit, delay):
@@ -572,17 +496,11 @@ class Sender:
                 self.log("사용자가 전송을 중지했습니다.")
             else:
                 self.phase = "finished"
-                self.log(f"게시글 전송 완료 · {self.rounds}회 반복 / 게시글 {self.sent}건", "success")
+                self.log(f"전송 완료 · {self.rounds}회 반복 / 성공 {self.sent}건 / 오류 {self.errors}건", "success")
         finally:
             # An unexpected exception must not leave POST tasks running after session cleanup.
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
-
-    def deletion_batch(self):
-        if self.active_batch is None:
-            self.active_batch = {"endpoint": self.endpoint, "posts": set(), "comments": set(), "snapshot": None}
-            self.deletion_batches.append(self.active_batch)
-        return self.active_batch
 
     def stop(self):
         first_stop = not self.stop_event.is_set()
@@ -619,22 +537,17 @@ class Sender:
                 if self.closing:
                     break
                 if not batch["snapshot"]:
-                    self.delete_errors += len(batch["posts"]) + len(batch.get("comments", ()))
-                    self.log("익명 세션이 없는 게시글·댓글은 삭제할 수 없습니다.", "error")
+                    self.delete_errors += len(batch["posts"])
+                    self.log("익명 세션이 없는 게시물은 삭제할 수 없습니다.", "error")
                     continue
                 try:
                     self.browser = BrowserSession(self)
                     page = await self.browser.restore(batch["snapshot"])
                     self.http = BrowserHTTP(page, batch["endpoint"])
-                    comments = batch.setdefault("comments", set())
-                    targets = [(comments, identity, self.http.origin + "/api/5/comments/" + str(identity))
-                               for identity in list(comments)]
-                    targets += [(batch["posts"], hashid, batch["endpoint"] + "/" + hashid)
-                                for hashid in list(batch["posts"])]
-                    for collection, identity, delete_url in targets:
+                    for hashid in list(batch["posts"]):
                         if self.closing:
                             break
-                        response = await self.http.delete(delete_url, timeout=10)
+                        response = await self.http.delete(batch["endpoint"] + "/" + hashid, timeout=10)
                         status = response.status_code
                         challenge = response.headers.get("cf-mitigated") == "challenge"
                         confirmed = status in {204, 404} and not challenge
@@ -645,7 +558,7 @@ class Sender:
                             except (ValueError, TypeError):
                                 pass
                         if confirmed:
-                            collection.remove(identity)
+                            batch["posts"].remove(hashid)
                             self.deleted += 1
                             self.log(f"삭제 확인 #{self.deleted}", "success")
                             continue
@@ -665,13 +578,13 @@ class Sender:
                     self.delete_errors += 1
                     self.log("삭제 응답을 확인하지 못했습니다. 남은 게시물은 긴급 삭제로 다시 시도할 수 있습니다.", "error")
                 finally:
-                    if (batch["posts"] or batch.get("comments")) and self.browser:
+                    if batch["posts"] and self.browser:
                         try:
                             batch["snapshot"] = await self.browser.snapshot()
                         except Exception:
                             pass  # Keep the last usable credentials if the browser failed.
                     await self.clear_connection()
-                if not batch["posts"] and not batch.get("comments"):
+                if not batch["posts"]:
                     self.deletion_batches.remove(batch)
         except Exception:
             self.delete_errors += 1
@@ -681,7 +594,7 @@ class Sender:
             self.board = board
             self.deleting = False
             self.phase = "delete_incomplete" if self.deletion_batches or self.untracked or self.delete_errors else "deleted"
-            remaining = sum(len(b["posts"]) + len(b.get("comments", ())) for b in self.deletion_batches)
+            remaining = sum(len(b["posts"]) for b in self.deletion_batches)
             self.log(f"긴급 삭제 결과 · 삭제 확인 {self.deleted}건 / 남음 {remaining}건 / 추적 불가 {self.untracked}건",
                      "warning" if self.phase == "delete_incomplete" else "success")
             self.last_activity = time.monotonic()
