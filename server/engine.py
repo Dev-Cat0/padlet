@@ -270,7 +270,8 @@ class Sender:
             self.ready = False
         try:
             await self.clear_connection()
-            self.http = AsyncSession(impersonate="chrome120", timeout=15)
+            self.http = AsyncSession(impersonate="chrome120", timeout=15,
+                                     max_clients=MAX_INFLIGHT_REQUESTS)
             async with asyncio.timeout(40):
                 self.endpoint, self.headers, self.template, self.board = await prepare(self.http, url)
             self.ready, self.phase = True, "ready"
@@ -322,7 +323,8 @@ class Sender:
             # Never cancel a POST already in flight: its result may be ambiguous.
             if self.stop_event.is_set() or paused.is_set():
                 return "pending", 0
-            template = copy.deepcopy(self.template)
+            # Only section keys change here; make_payload owns the deep copy.
+            template = self.template.copy()
             if section is not None:
                 template["wall_section_id"] = section["id"]
                 template.pop("wall_section_hashid", None)
@@ -410,7 +412,9 @@ class Sender:
 
     async def run_pipelined(self, targets, subject, body, limit, delay):
         """Overlap scheduled rounds within a fixed request budget."""
-        capacity = max(1, MAX_INFLIGHT_REQUESTS // len(targets))
+        # At zero delay, let the semaphore fill slots left over by a partial round.
+        capacity = max(1, (math.ceil(MAX_INFLIGHT_REQUESTS / len(targets)) if delay == 0
+                           else MAX_INFLIGHT_REQUESTS // len(targets)))
         semaphore = asyncio.Semaphore(MAX_INFLIGHT_REQUESTS)
         paused = asyncio.Event()
         active, retries = {}, deque()

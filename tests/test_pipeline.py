@@ -25,6 +25,7 @@ def reply(status=201, retry=0):
 def test_refills_before_slow_first_round_finishes_and_keeps_exact_count(delay):
     async def scenario():
         sender = sender_for()
+        budget = 32 if delay == 0 else 30
         calls, active, peak = [], 0, 0
         full, slow, release, refilled = (asyncio.Event() for _ in range(4))
         async def post(url, **kwargs):
@@ -33,7 +34,7 @@ def test_refills_before_slow_first_round_finishes_and_keeps_exact_count(delay):
             calls.append(kwargs["json"])
             active += 1
             peak = max(peak, active)
-            if len(calls) == 30:
+            if len(calls) == budget:
                 full.set()
             if len(calls) == 33:
                 refilled.set()
@@ -45,7 +46,7 @@ def test_refills_before_slow_first_round_finishes_and_keeps_exact_count(delay):
         try:
             await asyncio.wait_for(full.wait(), 1)
             await asyncio.sleep(.02)
-            assert len(calls) == 30  # No unbounded task queue while responses are pending.
+            assert len(calls) == budget  # No unbounded task queue while responses are pending.
             release.set()
             await asyncio.wait_for(refilled.wait(), 1)
             assert not slow.is_set()  # Refill does not wait for the oldest round.
@@ -54,7 +55,7 @@ def test_refills_before_slow_first_round_finishes_and_keeps_exact_count(delay):
             assert sender.phase == "finished" and sender.rounds == 13 and sender.sent == 39
             assert Counter(p["wall_section_id"] for p in calls) == {0: 13, 1: 13, 2: 13}
             assert len({p["cid"] for p in calls}) == 39
-            assert peak == 30
+            assert peak == budget
         finally:
             sender.stop()
             slow.set()
@@ -235,7 +236,7 @@ def test_large_section_count_bounds_overlapping_rounds():
         await sender.start("Title", "", 2, 0)
         await asyncio.wait_for(full.wait(), 1)
         await asyncio.sleep(.02)
-        assert len(calls) == 20
+        assert len(calls) == 32
         release.set()
         await asyncio.wait_for(sender.worker, 1)
         assert sender.sent == 40 and sender.rounds == 2

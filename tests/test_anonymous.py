@@ -105,7 +105,10 @@ def test_sessions_use_separate_http_clients_and_hide_tokens(monkeypatch):
         first, second = Sender(), Sender()
         http1, http2 = client(), client()
         queue = iter([http1, http2])
-        monkeypatch.setattr(engine, 'AsyncSession', lambda **kwargs: next(queue))
+        def session_factory(**kwargs):
+            assert kwargs['max_clients'] == engine.MAX_INFLIGHT_REQUESTS
+            return next(queue)
+        monkeypatch.setattr(engine, 'AsyncSession', session_factory)
         await first.connect(URL)
         await second.connect(URL)
         assert first.http is http1 and second.http is http2
