@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from server.engine import Sender
+from playwright.async_api import Error as BrowserError
 
 
 def sender_for(sections=3):
@@ -19,6 +20,31 @@ def sender_for(sections=3):
 
 def reply(status=201, retry=0):
     return SimpleNamespace(status_code=status, headers={"Retry-After": str(retry)})
+
+
+@pytest.mark.parametrize("error, reason", [
+    (TimeoutError("private-token"), "응답 대기 시간 초과"),
+    (BrowserError("TimeoutError: signal timed out private-token"), "응답 대기 시간 초과"),
+    (BrowserError("Target page has been closed private-token"), "서버 브라우저 연결 종료"),
+    (BrowserError("TypeError: Failed to fetch private-token"), "네트워크 또는 전송 처리 오류"),
+])
+def test_post_failure_diagnostics_do_not_leak_or_retry(error, reason, caplog):
+    async def scenario():
+        sender = sender_for(1)
+        calls = []
+        async def post(url, **kwargs):
+            calls.append(kwargs)
+            assert kwargs['timeout'] == 30
+            raise error
+        sender.http = SimpleNamespace(post=post)
+        await sender.start("Title", "Body", 1, 0)
+        await sender.worker
+        assert len(calls) == 1 and sender.untracked == 1
+        assert sender.phase == 'error'
+        assert reason in str(sender.logs)
+        assert 'private-token' not in str(sender.logs) + caplog.text
+        assert 'Post failed: category=' in caplog.text
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("delay", [0, .00001])

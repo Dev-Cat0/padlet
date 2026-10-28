@@ -19,6 +19,7 @@ from .errors import rejection_message
 from .fields import validate_fields, read_fields
 
 MAX_INFLIGHT_REQUESTS = 32
+POST_RESPONSE_TIMEOUT = 30
 logger = logging.getLogger(__name__)
 
 
@@ -337,14 +338,23 @@ class Sender:
                     payload["body"] = template.get("body", "")
                 response = await self.http.post(self.endpoint,
                     json=payload, headers=self.headers,
-                    allow_redirects=False, timeout=10)
-            except Exception:
+                    allow_redirects=False, timeout=POST_RESPONSE_TIMEOUT)
+            except Exception as error:
                 self.untracked += 1  # The server may have created a post before the connection failed.
                 if self.browser:
                     self.ready = False
                 self.errors += 1
                 paused.set()
-                self.log(f"{label}: 네트워크 오류로 중지했습니다. 마지막 게시 성공 여부를 확인하세요.", "error")
+                detail = str(error).lower()
+                if isinstance(error, (TimeoutError, BrowserTimeoutError)) or "timeout" in detail or "timed out" in detail:
+                    reason, code = "응답 대기 시간 초과", "timeout"
+                elif isinstance(error, BrowserError) and any(word in detail for word in ("closed", "crash", "disconnected")):
+                    reason, code = "서버 브라우저 연결 종료", "browser_closed"
+                else:
+                    reason, code = "네트워크 또는 전송 처리 오류", "transport"
+                # Never log raw exception messages: they can contain request data.
+                logger.warning("Post failed: category=%s error_type=%s sent=%s", code, type(error).__name__, self.sent)
+                self.log(f"{label}: {reason}로 중지했습니다. 마지막 게시 성공 여부를 확인하세요.", "error")
                 return "error", 0
             status = response.status_code
             challenge = getattr(response, "headers", {}).get("cf-mitigated") == "challenge"
