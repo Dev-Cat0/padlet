@@ -114,7 +114,7 @@ def test_browser_open_reports_navigation_and_bootstrap_timeout_separately(step, 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("resource_type", ["image", "media", "font", "stylesheet"])
+@pytest.mark.parametrize("resource_type", ["image", "media", "font", "stylesheet", "script"])
 def test_automatic_browser_skips_display_resources(resource_type):
     async def scenario():
         browser = BrowserSession(Sender())

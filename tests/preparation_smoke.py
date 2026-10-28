@@ -48,7 +48,12 @@ async def main():
             source = browser.page
             await asyncio.wait_for(script_requested.wait(), 1)
             assert await source.evaluate('document.readyState') != 'complete'
-            page = await browser.sending_page()
+            new_page = browser.context.new_page
+            async def new_transport_page():
+                assert source.is_closed() and not browser.context.pages
+                return await new_page()
+            with patch.object(browser.context, 'new_page', new_transport_page):
+                page = await browser.sending_page()
             assert source.is_closed() and len(browser.context.pages) == 1
             transport = BrowserHTTP(page, 'https://padlet.com/api/9/wishes')
             assert (await transport.get('https://padlet.com/api/state')).json() == {'ok': True}

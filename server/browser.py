@@ -168,7 +168,9 @@ class BrowserSession:
             return False
 
     async def route(self, route):
-        if not self.capture_enabled and route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+        # Automatic preparation uses the inline guest bootstrap, not the board app.
+        # Avoid downloading/executing its bundles on the small server instance.
+        if not self.capture_enabled and route.request.resource_type in {"image", "media", "font", "stylesheet", "script"}:
             return await route.abort()
         if await self.public_url(route.request.url):
             await route.continue_()
@@ -382,6 +384,10 @@ class BrowserSession:
         if source.url != source_url:
             raise ValueError("준비 중 게시판 주소가 변경되어 중단했습니다.")
         old_pages = list(self.context.pages)
+        # Keep cookies in the context, but release the heavy renderer before
+        # allocating the transport tab (important on memory-limited hosts).
+        for old in old_pages:
+            await old.close()
         page = await self.context.new_page()
 
         async def shell(route):
@@ -400,8 +406,6 @@ class BrowserSession:
             }""", bootstrap)
             if page.url != source_url:
                 raise ValueError("전송 페이지의 주소를 확인할 수 없습니다.")
-            for old in old_pages:
-                await old.close()
             self.page = page
             return page
         except BaseException:
